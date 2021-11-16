@@ -1,5 +1,7 @@
 # Fast-Higashi
 
+![overview](./FastHigashi_overview.png)
+
 Fast-Higashi is an interpretable model that takes single-cell Hi-C (scHi-C) contact maps as input and jointly infers cell embeddings as well as meta-interactions.
 
 # Requirement
