@@ -375,13 +375,13 @@ def filter_bin(matrix_list=None, bulk=None, is_sym=True):
 		m[~v] = -1
 		n = v.sum()
 		print(f'{n} out of {len(c)} bins are valid')
-		return m, n
-	bin_id_mapping_row, num_bins_row = get_mapping(bulk.sum(1), bulk.shape[1])
+		return m, n, v
+	bin_id_mapping_row, num_bins_row, v_row = get_mapping(bulk.sum(1), bulk.shape[1])
 	if is_sym:
-		bin_id_mapping_col, num_bins_col = bin_id_mapping_row, num_bins_row
+		bin_id_mapping_col, num_bins_col, v_col = bin_id_mapping_row, num_bins_row, v_row
 	else:
-		bin_id_mapping_col, num_bins_col = get_mapping(bulk.sum(0), bulk.shape[0])
-	return bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col
+		bin_id_mapping_col, num_bins_col, v_col = get_mapping(bulk.sum(0), bulk.shape[0])
+	return bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col
 
 
 def slice_rearrange(matrix, size, fac_size):
