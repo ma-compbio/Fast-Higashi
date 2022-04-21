@@ -14,7 +14,7 @@ It is recommended to have pytorch installed (with CUDA support when applicable) 
 # Documentation
 The input format would be exactly the same as the Higashi software. 
 
-It requires one extra parameter in the config JSON file: fh_resolution, represents the resolution of contact maps that'll be used for running Fast-Higashi.
+It requires one extra parameter in the config JSON file: `resolution_fh=[xx]`, represents the resolution of contact maps that'll be used for running Fast-Higashi.
 
 Under construction. Will be updated here at the [Higashi wiki](https://github.com/ma-compbio/Higashi/wiki)
 
