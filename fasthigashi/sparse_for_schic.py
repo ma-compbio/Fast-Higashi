@@ -327,9 +327,9 @@ class Fake_Sparse:
 		self.shape = [shape[0]+2, shape[1]+2, shape[2]]
 		
 		if gpu_flag:
-			self.indices = [torch.tensor(indices[0]+1, dtype=torch.int16).pin_memory(),
-			                torch.tensor(indices[1]+1, dtype=torch.int16).pin_memory(),
-			                torch.tensor(indices[2], dtype=torch.int16).pin_memory()]
+			self.indices = [torch.tensor(indices[0]+1, dtype=torch.long).pin_memory(),
+			                torch.tensor(indices[1]+1, dtype=torch.long).pin_memory(),
+			                torch.tensor(indices[2], dtype=torch.long).pin_memory()]
 			self.values = torch.tensor(values, dtype=torch.float32).pin_memory()#[mask]
 			
 		else:
