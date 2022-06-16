@@ -73,11 +73,14 @@ def get_free_gpu(num=1):
 def get_memory_free(gpu_index):
 	try:
 		from py3nvml import py3nvml
+		print ("gpu mem")
 		py3nvml.nvmlInit()
-		handle = py3nvml.nvmlDeviceGetHandleByIndex(int(gpu_id))
+		handle = py3nvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
 		mem_info = py3nvml.nvmlDeviceGetMemoryInfo(handle)
+		print (mem_info)
 		return mem_info.free
 	except:
+		print ("cpu device?")
 		import psutil
 		return psutil.virtual_memory().available
 
@@ -320,7 +323,7 @@ class FastHigashi():
 		if do_cache:
 			print(f'saving cached input to {path2input_cache}')
 			sys.stdout.flush()
-			with open(path2input_cache, 'wb') as f: pickle.dump(all_matrix, f)
+			with open(path2input_cache, 'wb') as f: pickle.dump(all_matrix, f, protocol=4)
 		
 		sys.stdout.flush()
 		return all_matrix
@@ -348,6 +351,7 @@ class FastHigashi():
 				mask_chrom.append(off_diag)
 				read_count.append(np.sum(m))
 			print(n_bin, m.shape[0])
+			read_count = np.asarray(read_count)
 			mask_chrom = np.array(mask_chrom).astype('float')
 			mask.append(mask_chrom > n_bin)
 			read_count_all += np.asarray(read_count)
@@ -398,10 +402,11 @@ class FastHigashi():
 				else:
 					bs_bin_local = math.ceil(size / n_batch)
 					bs_cell = int(max_tensor_size / (bs_bin_local * (bs_bin_local + 2 * self.off_diag)))
+					print ("bs_cell", bs_cell)
 					n_batch = int(math.ceil(num_cell / bs_cell))
 					bs_cell = int(math.ceil(num_cell / n_batch))
 					bs_cell = min(bs_cell, num_cell)
-				
+				print ("bs_bin_local", bs_bin_local, size)
 				recommend_bs_cell.append(bs_cell)
 				try:
 					total_reads += len(all_matrix[i].values)
@@ -482,9 +487,9 @@ class FastHigashi():
 		self.p_list = [[p.detach().cpu().numpy() for p in temp] for temp in p_list]
 		
 		pickle.dump([self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list],
-		            open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "wb"))
+		            open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "wb"), protocol=4)
 		
-		pickle.dump([self.meta_embedding, self.D_list], open(os.path.join(self.path2result_dir, "results%s.pkl" % save_str), "wb"))
+		pickle.dump([self.meta_embedding, self.D_list], open(os.path.join(self.path2result_dir, "results%s.pkl" % save_str), "wb"), protocol=4)
 		
 	
 	def fetch_cell_embedding(self, final_dim=None):
@@ -515,5 +520,11 @@ if __name__ == '__main__':
 	             no_col=args.no_col)
 
 	wrapper.prep_dataset()
-	wrapper.run_model()
-
+	wrapper.run_model(extra=args.extra, rank=256)
+	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
+    #                  cell_feats1=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	#
+	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="linear", save_dir=wrapper.path2result_dir, with_CCA=False,
+	#                  label_info=wrapper.label_info,
+	#                  cell_feats1=wrapper.cell_feats1, log=None, number_only=False, save_fmt='png', linear_corr=True)
+	#
