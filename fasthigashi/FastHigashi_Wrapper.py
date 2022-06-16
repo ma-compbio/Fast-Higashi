@@ -231,7 +231,7 @@ class FastHigashi():
 		assert not any(np.isnan(m.data).any() for m in matrix_list)
 		
 		nnz = sum(m.nnz for m in matrix_list)
-		indices = np.empty([3, nnz], dtype=np.int16)
+		indices = np.empty([3, nnz], dtype=np.int32)
 		values = np.empty([nnz], dtype=np.float32)
 		del nnz
 		
