@@ -365,6 +365,7 @@ class FastHigashi():
 		
 	def prep_dataset(self):
 		self.label_info, reorder, self.sig_list, readcount, qc = self.preprocess_meta()
+		self.reorder = reorder
 		good_qc_num = np.sum(qc > 0)
 		print("good", good_qc_num, "bad", len(qc) - good_qc_num)
 		tensor_list = []
@@ -453,6 +454,91 @@ class FastHigashi():
 		
 		self.all_matrix = all_matrix
 	
+	def only_partial_rwr(self):
+		try:
+			from .partial_rwr import partial_rwr
+		except:
+			from partial_rwr import partial_rwr
+		chrom_count = 0
+		impute_result = h5py.File(os.path.join(self.path2result_dir, "impute_prwr.hdf5"), "w")
+		for chrom_data in tqdm(self.all_matrix, desc="imputing"):
+			group = impute_result.create_group(self.chrom_list[chrom_count])
+			
+			for cell_batch_id in range(0, chrom_data.num_cell_batch):
+				slice_cell = chrom_data.cell_slice_list[cell_batch_id]
+				
+				imputed_map = None
+				
+				# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
+				for bin_batch_id in range(0, chrom_data.num_bin_batch):
+					slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
+					slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
+					slice_row = chrom_data.bin_slice_list[bin_batch_id]
+					
+					chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
+					                                          save_context=dict(device=self.device),
+					                                          transpose=True,
+					                                          do_conv=False)
+					
+					chrom_batch_cell_batch, t = chrom_batch_cell_batch
+					if imputed_map is None:
+						imputed_map = np.zeros((int(chrom_batch_cell_batch.shape[0]), chrom_data.num_bin, chrom_data.num_bin))
+					if kind == 'hic':
+						chrom_batch_cell_batch, n_i = partial_rwr(chrom_batch_cell_batch,
+						                                      slice_start=slice_local.start,
+						                                      slice_end=slice_local.stop,
+						                                      do_conv=self.do_conv,
+						                                      do_rwr=self.do_rwr,
+						                                      do_col=False,
+						                                      bin_cov=torch.ones(1),
+						                                      return_rwr_iter=True,
+						                                      force_rwr_epochs=-1,
+						                                      final_transpose=False)
+						
+						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
+				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
+				print (self.reorder[slice_cell], np.min(self.reorder[slice_cell]), np.max(self.reorder[slice_cell]))
+				for i in range(len(imputed_map)):
+					group.create_dataset(str(self.reorder[slice_cell][i]), data=imputed_map[i])
+			
+			for cell_batch_id in range(0, chrom_data.num_cell_batch_bad):
+				slice_cell = chrom_data.cell_slice_list[cell_batch_id + chrom_data.num_cell_batch]
+				imputed_map = None
+				# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
+				for bin_batch_id in range(0, chrom_data.num_bin_batch):
+					slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
+					slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
+					slice_row = chrom_data.bin_slice_list[bin_batch_id]
+					
+					chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
+					                                                save_context=dict(device=self.device),
+					                                                transpose=True,
+					                                                do_conv=False,
+					                                                good_qc=False)
+					
+					chrom_batch_cell_batch, t = chrom_batch_cell_batch
+					if imputed_map is None:
+						imputed_map = np.zeros((int(chrom_batch_cell_batch.shape[0]), chrom_data.num_bin, chrom_data.num_bin))
+					if kind == 'hic':
+						chrom_batch_cell_batch, _ = partial_rwr(chrom_batch_cell_batch,
+						                                        slice_start=slice_local.start,
+						                                        slice_end=slice_local.stop,
+						                                        do_conv=self.do_conv,
+						                                        do_rwr=self.do_rwr,
+						                                        do_col=False,
+						                                        bin_cov=torch.ones(1),
+						                                        return_rwr_iter=True,
+						                                        force_rwr_epochs=-1,
+						                                        final_transpose=False)
+						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
+				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
+				for i in range(len(imputed_map)):
+					group.create_dataset(str(self.reorder[slice_cell][i]), data=imputed_map[i])
+					
+						
+			chrom_count += 1
+		impute_result.close()
+	
 	def run_model(self, dim1=.6,
 	              rank=256,
 				  n_iter_parafac=1,
@@ -521,6 +607,7 @@ if __name__ == '__main__':
 
 	wrapper.prep_dataset()
 	wrapper.run_model(extra=args.extra, rank=256)
+	# wrapper.only_partial_rwr()
 	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
     #                  cell_feats1=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
 	#

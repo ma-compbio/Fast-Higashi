@@ -85,7 +85,7 @@ class Fast_Higashi_core():
 			n_i_list = []
 			bin_cov = torch.ones([chrom_data.num_cell, chrom_data.num_bin],
 			                     dtype=torch.float32, device='cpu') * 1e-4
-			bad_bin_cov = torch.ones([chrom_data.num_cell, chrom_data.num_bin],
+			bad_bin_cov = torch.ones([chrom_data.total_cell_num - chrom_data.num_cell, chrom_data.num_bin],
 			                         dtype=torch.float32, device='cpu') * 1e-4
 			# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
 			for bin_batch_id in range(0, chrom_data.num_bin_batch):
@@ -276,7 +276,7 @@ class Fast_Higashi_core():
 						                                     bin_cov=bin_cov[slice_cell, slice_col],
 						                                     force_rwr_epochs=self.n_i[chrom_index])
 					
-						
+					
 					if first_iter:
 						rec_error_tensor_norm[chrom_index] += torch.linalg.norm(chrom_batch_cell_batch).square_().item()
 					
