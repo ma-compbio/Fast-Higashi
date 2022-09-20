@@ -53,8 +53,12 @@ def get_config(config_path = "./config.jSON"):
 
 
 def get_free_gpu(num=1):
-	os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Free > ./tmp')
-	memory_available = [int(x.split()[2]) for x in open('tmp', 'r').readlines()]
+	# os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Free > ./tmp')
+	os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Total > ./tmp1')
+	os.system('nvidia-smi -q -d Memory |grep -A4 GPU|grep Used > ./tmp2')
+	memory_all = [int(x.split()[2]) for x in open('tmp1', 'r').readlines()]
+	memory_used = [int(x.split()[2]) for x in open('tmp2', 'r').readlines()]
+	memory_available = [m1-m2 for m1,m2 in zip(memory_all, memory_used)]
 	if len(memory_available) > 0:
 		max_mem = np.max(memory_available)
 		ids = np.where(memory_available >= max_mem-1000)[0]
@@ -110,14 +114,14 @@ def parse_embedding(project_list, fac, dim=None):
 
 class FastHigashi():
 	def __init__(self, config_path,
-	             path2input_cache,
-	             path2result_dir,
-	             off_diag,
-	             filter,
-	             do_conv,
-	             do_rwr,
-	             do_col,
-	             no_col):
+				 path2input_cache,
+				 path2result_dir,
+				 off_diag,
+				 filter,
+				 do_conv,
+				 do_rwr,
+				 do_col,
+				 no_col):
 		super().__init__()
 		self.off_diag = off_diag
 		self.filter = filter
@@ -159,7 +163,7 @@ class FastHigashi():
 		bad_qc = np.where(qc <= 0)[0]
 		# Always put good quality cells before bad quality cells
 		reorder = np.concatenate([np.sort(good_qc),
-		                          np.sort(bad_qc)], axis=0)
+								  np.sort(bad_qc)], axis=0)
 		np.save(os.path.join(self.path2input_cache, "reorder.npy"), reorder)
 		
 		data_dir = self.config['data_dir']
@@ -222,7 +226,7 @@ class FastHigashi():
 		bulk = calc_bulk(matrix_list)
 		print(chrom, bulk.shape)
 		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk,
-		                                                                                              is_sym=is_sym)
+																									  is_sym=is_sym)
 		
 		matrix_list = normalize_per_cell(
 			matrix_list, matrix_list_intra=matrix_list, bulk=None,
@@ -476,24 +480,24 @@ class FastHigashi():
 					slice_row = chrom_data.bin_slice_list[bin_batch_id]
 					
 					chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
-					                                          save_context=dict(device=self.device),
-					                                          transpose=True,
-					                                          do_conv=False)
+															  save_context=dict(device=self.device),
+															  transpose=True,
+															  do_conv=False)
 					
 					chrom_batch_cell_batch, t = chrom_batch_cell_batch
 					if imputed_map is None:
 						imputed_map = np.zeros((int(chrom_batch_cell_batch.shape[0]), chrom_data.num_bin, chrom_data.num_bin))
 					if kind == 'hic':
 						chrom_batch_cell_batch, n_i = partial_rwr(chrom_batch_cell_batch,
-						                                      slice_start=slice_local.start,
-						                                      slice_end=slice_local.stop,
-						                                      do_conv=self.do_conv,
-						                                      do_rwr=self.do_rwr,
-						                                      do_col=False,
-						                                      bin_cov=torch.ones(1),
-						                                      return_rwr_iter=True,
-						                                      force_rwr_epochs=-1,
-						                                      final_transpose=False)
+															  slice_start=slice_local.start,
+															  slice_end=slice_local.stop,
+															  do_conv=self.do_conv,
+															  do_rwr=self.do_rwr,
+															  do_col=False,
+															  bin_cov=torch.ones(1),
+															  return_rwr_iter=True,
+															  force_rwr_epochs=-1,
+															  final_transpose=False)
 						
 						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
 				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
@@ -511,25 +515,25 @@ class FastHigashi():
 					slice_row = chrom_data.bin_slice_list[bin_batch_id]
 					
 					chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
-					                                                save_context=dict(device=self.device),
-					                                                transpose=True,
-					                                                do_conv=False,
-					                                                good_qc=False)
+																	save_context=dict(device=self.device),
+																	transpose=True,
+																	do_conv=False,
+																	good_qc=False)
 					
 					chrom_batch_cell_batch, t = chrom_batch_cell_batch
 					if imputed_map is None:
 						imputed_map = np.zeros((int(chrom_batch_cell_batch.shape[0]), chrom_data.num_bin, chrom_data.num_bin))
 					if kind == 'hic':
 						chrom_batch_cell_batch, _ = partial_rwr(chrom_batch_cell_batch,
-						                                        slice_start=slice_local.start,
-						                                        slice_end=slice_local.stop,
-						                                        do_conv=self.do_conv,
-						                                        do_rwr=self.do_rwr,
-						                                        do_col=False,
-						                                        bin_cov=torch.ones(1),
-						                                        return_rwr_iter=True,
-						                                        force_rwr_epochs=-1,
-						                                        final_transpose=False)
+																slice_start=slice_local.start,
+																slice_end=slice_local.stop,
+																do_conv=self.do_conv,
+																do_rwr=self.do_rwr,
+																do_col=False,
+																bin_cov=torch.ones(1),
+																return_rwr_iter=True,
+																force_rwr_epochs=-1,
+																final_transpose=False)
 						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
 				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
 				for i in range(len(imputed_map)):
@@ -540,9 +544,9 @@ class FastHigashi():
 		impute_result.close()
 	
 	def run_model(self, dim1=.6,
-	              rank=256,
+				  rank=256,
 				  n_iter_parafac=1,
-	              extra=""):
+				  extra=""):
 		self.rank = rank
 		save_str = "dim1_%.1f_rank_%d_niterp_%d_%s" % (dim1, rank, n_iter_parafac, extra)
 		self.save_str = save_str
@@ -573,7 +577,7 @@ class FastHigashi():
 		self.p_list = [[p.detach().cpu().numpy() for p in temp] for temp in p_list]
 		
 		pickle.dump([self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list],
-		            open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "wb"), protocol=4)
+					open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "wb"), protocol=4)
 		
 		pickle.dump([self.meta_embedding, self.D_list], open(os.path.join(self.path2result_dir, "results%s.pkl" % save_str), "wb"), protocol=4)
 		
@@ -596,20 +600,20 @@ if __name__ == '__main__':
 	
 	
 	wrapper = FastHigashi(config_path=args.config,
-	             path2input_cache=args.path2input_cache,
-	             path2result_dir=args.path2result_dir,
-	             off_diag=args.off_diag,
-	             filter=args.filter,
-	             do_conv=args.do_conv,
-	             do_rwr=args.do_rwr,
-	             do_col=args.do_col,
-	             no_col=args.no_col)
+				 path2input_cache=args.path2input_cache,
+				 path2result_dir=args.path2result_dir,
+				 off_diag=args.off_diag,
+				 filter=args.filter,
+				 do_conv=args.do_conv,
+				 do_rwr=args.do_rwr,
+				 do_col=args.do_col,
+				 no_col=args.no_col)
 
 	wrapper.prep_dataset()
 	wrapper.run_model(extra=args.extra, rank=256)
 	# wrapper.only_partial_rwr()
 	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
-    #                  cell_feats1=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	#                  cell_feats1=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
 	#
 	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="linear", save_dir=wrapper.path2result_dir, with_CCA=False,
 	#                  label_info=wrapper.label_info,
