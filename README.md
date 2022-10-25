@@ -43,7 +43,7 @@ Cite our paper by
 }
 ```
 
-![figs/Overview.png](https://github.com/ma-compbio/Fast-Higashi/blob/main/figs/higashi_title.png)
+![figs/Overview.png](https://github.com/ma-compbio/Fast-Higashi/blob/main/figs/higashi_cellsystems.png)
 
 
 
