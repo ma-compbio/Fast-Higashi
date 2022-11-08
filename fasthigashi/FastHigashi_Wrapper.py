@@ -1,24 +1,21 @@
-import copy
 import torch
 import argparse, os, gc, pickle, sys
 from pathlib import Path
-from tqdm.auto import tqdm, trange
+from tqdm.auto import tqdm
 import math, time, h5py
 import numpy as np
 import pandas as pd
 from scipy.sparse import coo_matrix, csr_matrix
-
+from sklearn.preprocessing import normalize
 
 try:
 	from .parafac2_intergrative import Fast_Higashi_core
-	from .preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip
-	# from .evaluation import evaluate_combine
+	from .preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, SQRT_VC, normalize_per_batch
 	from .sparse_for_schic import Sparse, Chrom_Dataset
 except:
 	try:
 		from parafac2_intergrative import Fast_Higashi_core
-		from preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip
-		# from evaluation import evaluate_combine
+		from preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, SQRT_VC, normalize_per_batch
 		from sparse_for_schic import Sparse, Chrom_Dataset
 	except:
 		raise EOFError
@@ -29,7 +26,7 @@ def parse_args():
 	parser.add_argument('-c', '--config', type=Path, default=Path("../config_dir/config_ramani.JSON"))
 	parser.add_argument('--path2input_cache', type=Path, default=None)
 	parser.add_argument('--path2result_dir', type=Path, default=None)
-	parser.add_argument('--rank', type=int, default=200)
+	parser.add_argument('--rank', type=int, default=256)
 	parser.add_argument('--size', type=int, default=15)
 	parser.add_argument('--size_func', type=str, default='scale')
 	parser.add_argument('--off_diag', type=int, default=100)
@@ -41,7 +38,9 @@ def parse_args():
 	parser.add_argument('--do_col', action='store_true', default=False)
 	parser.add_argument('--no_col', action='store_true', default=False)
 	parser.add_argument('--extra', type=str, default="")
+	parser.add_argument('--cache_extra', type=str, default="")
 	parser.add_argument('--filter', action='store_true', default=False)
+	parser.add_argument('--batch_norm', action='store_true', default=False)
 
 	return parser.parse_args()
 
@@ -138,6 +137,13 @@ class FastHigashi():
 		self.data_dir = self.config['data_dir']
 		self.fh_resolutions = self.config['resolution_fh']
 		
+		
+		if path2input_cache is None:
+			path2input_cache = self.temp_dir
+		
+		if path2result_dir is None:
+			path2result_dir = self.temp_dir
+		
 		self.path2input_cache = path2input_cache
 		if not os.path.exists(path2input_cache):
 			os.mkdir(path2input_cache)
@@ -149,9 +155,37 @@ class FastHigashi():
 		_, self.gpu_id = get_free_gpu()
 		if torch.cuda.is_available():
 			self.device = 'cuda'
-			torch.set_num_threads(4)
+			# torch.set_num_threads(4)
 		else:
 			self.device = 'cpu'
+	
+	def eval_batch_mix(self, embed):
+		from pynndescent import PyNNDescentTransformer
+		import warnings
+		from sklearn.decomposition import TruncatedSVD
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore")
+			if "batch_id" in self.config:
+				batch_id = self.batch_id
+				knn_graph = PyNNDescentTransformer(n_neighbors=50).fit_transform(embed)
+				# print ("first knn")
+				knn_graph.data = np.ones_like(knn_graph.data)
+				knn_graph2nd = knn_graph @ knn_graph.T
+				# print ("sparse dot")
+				knn_graph2nd_embed = TruncatedSVD(n_components=embed.shape[-1]).fit_transform(knn_graph2nd)
+				# print ("svd")
+				knn_graph2nd = PyNNDescentTransformer(n_neighbors=10).fit_transform(knn_graph2nd_embed)
+				# print ("second knn")
+				knn_graph = PyNNDescentTransformer(n_neighbors=10).fit_transform(embed)
+				# print ("third knn")
+				knn_graph = knn_graph.tocoo()
+				knn_graph2nd = knn_graph2nd.tocoo()
+				mix_score = (np.sum(batch_id[knn_graph.row] == batch_id[knn_graph.col]) - len(embed)) / (
+							len(knn_graph.row) - len(embed))
+				mix_score2 = (np.sum(batch_id[knn_graph2nd.row] == batch_id[knn_graph2nd.col]) - len(embed)) / (
+							len(knn_graph2nd.row) - len(embed))
+			
+			return np.array([mix_score, mix_score2])
 	
 	def preprocess_meta(self):
 		if os.path.isfile(os.path.join(self.path2input_cache, "qc.npy")):
@@ -179,6 +213,9 @@ class FastHigashi():
 		
 		gc.collect()
 		
+		if "batch_id" in self.config:
+			self.batch_id = np.asarray(label_info[self.config['batch_id']])
+		
 		return label_info, reorder, sig_list, readcount, qc
 	
 	def pack_training_data_one_process(self,
@@ -188,7 +225,8 @@ class FastHigashi():
 			merge_fac_row=1, merge_fac_col=1,
 			is_sym=True,
 			filename_pattern='%s_sparse_adj.npy',
-			force_shift=None):
+			force_shift=None,
+	        batch_norm=True):
 		
 		filename = filename_pattern % chrom
 		a = np.load(os.path.join(raw_dir, filename), allow_pickle=True)[reorder]
@@ -221,13 +259,19 @@ class FastHigashi():
 				m.row //= merge_fac_row
 				m.sum_duplicates()
 				m.resize(list(np.ceil(np.array(m.shape) / np.array([merge_fac_col, merge_fac_row])).astype('int')))
-			print(list(np.ceil(np.array(m.shape) / np.array([merge_fac_col, merge_fac_row])).astype('int')))
 		
 		bulk = calc_bulk(matrix_list)
-		print(chrom, bulk.shape)
 		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk,
-																									  is_sym=is_sym)
+		                                                                                              is_sym=is_sym)
 		
+		if "batch_id" in self.config:
+			if batch_norm:
+				print ("per batch norm")
+				matrix_list = normalize_per_batch(
+					matrix_list=matrix_list,
+					batch_id=self.batch_id
+				)
+			
 		matrix_list = normalize_per_cell(
 			matrix_list, matrix_list_intra=matrix_list, bulk=None,
 			per_cell_normalize_func=[
@@ -287,7 +331,7 @@ class FastHigashi():
 		indices = np.ascontiguousarray(indices[:, :idx_nnz])
 		values = np.ascontiguousarray(values[:idx_nnz])
 		shape = shape + (len(matrix_list),)
-		print(shape, do_shift)
+		# print(shape, do_shift)
 		assert indices.min() >= 0
 		assert (indices.max(1) < shape).all()
 		gc.collect()
@@ -299,10 +343,9 @@ class FastHigashi():
 			s = 15
 		mean_, std_ = np.mean(values), np.std(values)
 		values = np.clip(values, a_min=None, a_max=mean_ + s * std_)
-		
 		return indices, values, shape
 	
-	def preprocess_contact_map(self, config, reorder, path2input_cache, key_fn=lambda c: c, **kwargs):
+	def preprocess_contact_map(self, config, reorder, path2input_cache, batch_norm, key_fn=lambda c: c, **kwargs):
 		print(f'cache file = {path2input_cache}')
 		do_cache = path2input_cache is not None
 		
@@ -315,10 +358,11 @@ class FastHigashi():
 		
 		all_matrix = [self.pack_training_data_one_process(
 			raw_dir=Path(config['temp_dir']) / 'raw', chrom=chrom, reorder=reorder,
+			batch_norm=batch_norm,
 			**kwargs,
 		) for chrom in chrom_list]
 		
-		all_matrix = [Sparse(indices, values, shape) for indices, values, shape in all_matrix]
+		all_matrix = [Sparse(indices, values, shape, copy=False) for indices, values, shape in tqdm(all_matrix)]
 		size_list = []
 		for obj in tqdm(all_matrix):
 			obj.sort_indices()
@@ -332,6 +376,14 @@ class FastHigashi():
 		sys.stdout.flush()
 		return all_matrix
 	
+	@staticmethod
+	def sum_sparse(m):
+		x = np.zeros(m[0].shape)
+		for a in tqdm(m):
+			ri = np.repeat(np.arange(a.shape[0]), np.diff(a.indptr))
+			x[ri, a.indices] += a.data
+		return x
+	
 	def get_qc(self):
 		temp_dir = self.config['temp_dir']
 		raw_dir = os.path.join(temp_dir, "raw")
@@ -342,10 +394,7 @@ class FastHigashi():
 		for chrom in chrom_list:
 			read_count = []
 			a = np.load(os.path.join(raw_dir, "%s_sparse_adj.npy" % chrom), allow_pickle=True)
-			try:
-				bulk = np.asarray(np.sum(a, axis=0).todense())
-			except:
-				bulk = np.asarray(np.sum(a, axis=0))
+			bulk = self.sum_sparse(a)
 			cov = np.sum(bulk, axis=-1)
 			n_bin = np.sum(cov > 0.1 * cov.shape[0] * scale)
 			
@@ -354,32 +403,37 @@ class FastHigashi():
 				off_diag = (np.sum(m > 0) + np.sum(m.diagonal() > 0)) / 2
 				mask_chrom.append(off_diag)
 				read_count.append(np.sum(m))
-			print(n_bin, m.shape[0])
+			# print(n_bin, m.shape[0])
 			read_count = np.asarray(read_count)
 			mask_chrom = np.array(mask_chrom).astype('float')
 			mask.append(mask_chrom > n_bin)
 			read_count_all += np.asarray(read_count)
-			print("pass", np.sum(mask[-1]))
+			# print("pass", np.sum(mask[-1]))
 		kept = (np.sum(np.array(mask).astype('float'), axis=0) >= (len(chrom_list))).astype('float32')
-		print("total_pass", np.sum(kept))
+		print("total number of cells that pass qc check", np.sum(kept))
 		read_count_all = np.log1p(read_count_all)
 		np.save(os.path.join(self.path2input_cache, "qc.npy"), kept)
 		np.save(os.path.join(self.path2input_cache, "read_count_all.npy"), read_count_all)
 		return kept, read_count_all
 		
-	def prep_dataset(self):
+	def prep_dataset(self, meta_only=False, batch_norm=True):
 		self.label_info, reorder, self.sig_list, readcount, qc = self.preprocess_meta()
 		self.reorder = reorder
+		if meta_only:
+			return
 		good_qc_num = np.sum(qc > 0)
-		print("good", good_qc_num, "bad", len(qc) - good_qc_num)
-		tensor_list = []
+		# print("good", good_qc_num, "bad", len(qc) - good_qc_num)
+		tensor_list = [None] * len(self.fh_resolutions) * len(self.chrom_list)
 		recommend_bs_cell = []
+		ct = 0
 		for res in self.fh_resolutions:
 			all_matrix = []
-			path2input_cache_intra = os.path.join(self.path2input_cache, 'cache_intra_%d.pkl' % res)
-			print("merge_fac_row", int(res / self.config['resolution']))
+			path2input_cache_intra = os.path.join(self.path2input_cache, 'cache_intra_%d%s.pkl' % (res, args.cache_extra))
+			# print("merge_fac_row", int(res / self.config['resolution']))
 			all_matrix += self.preprocess_contact_map(
-				self.config, reorder=reorder, path2input_cache=path2input_cache_intra, is_sym=True,
+				self.config, reorder=reorder, path2input_cache=path2input_cache_intra,
+				batch_norm=batch_norm,
+				is_sym=True,
 				off_diag=self.off_diag,
 				fac_size=1,
 				merge_fac_row=int(res / self.config['resolution']), merge_fac_col=int(res / self.config['resolution']),
@@ -407,20 +461,19 @@ class FastHigashi():
 				else:
 					bs_bin_local = math.ceil(size / n_batch)
 					bs_cell = int(max_tensor_size / (bs_bin_local * (bs_bin_local + 2 * self.off_diag)))
-					print ("bs_cell", bs_cell)
+					# print ("bs_cell", bs_cell)
 					n_batch = int(math.ceil(num_cell / bs_cell))
 					bs_cell = int(math.ceil(num_cell / n_batch))
 					bs_cell = min(bs_cell, num_cell)
-				print ("bs_bin_local", bs_bin_local, size)
+				# print ("bs_bin_local", bs_bin_local, size)
 				recommend_bs_cell.append(bs_cell)
 				try:
 					total_reads += len(all_matrix[i].values)
 				except:
 					total_reads += torch.sum(all_matrix[i] > 0)
 				total_possible += np.prod(all_matrix[i].shape)
-				a = copy.deepcopy(all_matrix[i])
-				tensor_list.append(Chrom_Dataset(
-					tensor=a,
+				tensor_list[ct] = Chrom_Dataset(
+					tensor=all_matrix[i],
 					bs_bin=bs_bin_local,
 					bs_cell=bs_cell,
 					good_qc_num=good_qc_num if self.filter else -1,
@@ -429,7 +482,9 @@ class FastHigashi():
 					compact=True,
 					flank=self.off_diag,
 					chrom=self.chrom_list[i],
-					resolution=res))
+					resolution=res)
+				ct += 1
+				
 			
 			sparsity = total_reads / total_possible
 			print("sparsity", sparsity)
@@ -446,9 +501,9 @@ class FastHigashi():
 			if self.no_col and self.do_col:
 				print("choose one between do col or no col!")
 				raise EOFError
-		
-		self.cell_feats1 = readcount[reorder].reshape((-1, 1))
-		print("recommend_bs_cell", recommend_bs_cell)
+			
+		self.coverage_feats = readcount[reorder].reshape((-1, 1))
+		print("recommend_bs_cell", recommend_bs_cell, "pinning memory")
 		all_matrix = tensor_list
 		for i in range(len(all_matrix)):
 			all_matrix[i].pin_memory()
@@ -467,13 +522,13 @@ class FastHigashi():
 		impute_result = h5py.File(os.path.join(self.path2result_dir, "impute_prwr.hdf5"), "w")
 		for chrom_data in tqdm(self.all_matrix, desc="imputing"):
 			group = impute_result.create_group(self.chrom_list[chrom_count])
-			
+			group.create_dataset("shape", data=np.asarray([chrom_data.num_bin, chrom_data.num_bin]))
 			for cell_batch_id in range(0, chrom_data.num_cell_batch):
 				slice_cell = chrom_data.cell_slice_list[cell_batch_id]
 				
 				imputed_map = None
 				
-				# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
+				
 				for bin_batch_id in range(0, chrom_data.num_bin_batch):
 					slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
 					slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
@@ -501,14 +556,15 @@ class FastHigashi():
 						
 						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
 				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
-				print (self.reorder[slice_cell], np.min(self.reorder[slice_cell]), np.max(self.reorder[slice_cell]))
 				for i in range(len(imputed_map)):
-					group.create_dataset(str(self.reorder[slice_cell][i]), data=imputed_map[i])
-			
+					m = imputed_map[i]
+					m = m - np.diag(np.diag(m) / 2)
+					group.create_dataset(str(self.reorder[slice_cell][i]), data=m.astype('float32'))
+			i
 			for cell_batch_id in range(0, chrom_data.num_cell_batch_bad):
 				slice_cell = chrom_data.cell_slice_list[cell_batch_id + chrom_data.num_cell_batch]
 				imputed_map = None
-				# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
+				
 				for bin_batch_id in range(0, chrom_data.num_bin_batch):
 					slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
 					slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
@@ -537,7 +593,9 @@ class FastHigashi():
 						imputed_map[:, slice_row, slice_col] = chrom_batch_cell_batch.detach().cpu().numpy()
 				imputed_map = imputed_map + imputed_map.transpose(0, 2, 1)
 				for i in range(len(imputed_map)):
-					group.create_dataset(str(self.reorder[slice_cell][i]), data=imputed_map[i])
+					m = imputed_map[i]
+					m = m - np.diag(np.diag(m) / 2)
+					group.create_dataset(str(self.reorder[slice_cell][i]), data=m.astype('float32'))
 					
 						
 			chrom_count += 1
@@ -552,7 +610,7 @@ class FastHigashi():
 		self.save_str = save_str
 		print(save_str)
 		start = time.time()
-		model = Fast_Higashi_core(rank=rank).to(self.device)
+		model = Fast_Higashi_core(rank=rank, off_diag=self.off_diag).to(self.device)
 		result = model.fit_transform(
 			self.all_matrix,
 			size_ratio=dim1,
@@ -561,7 +619,7 @@ class FastHigashi():
 			do_conv=self.do_conv,
 			do_rwr=self.do_rwr,
 			do_col=self.final_do_col,
-			tol=3.0e-4,
+			tol=3.0e-5,
 			gpu_id=self.gpu_id
 		)
 		print("takes: %.2f s" % (time.time() - start))
@@ -575,30 +633,57 @@ class FastHigashi():
 		self.B_list = [B.detach().cpu().numpy() for B in B_list]
 		self.D_list = [D.detach().cpu().numpy() for D in D_list]
 		self.p_list = [[p.detach().cpu().numpy() for p in temp] for temp in p_list]
-		
+		del factors_all, p_list, weights_all
 		pickle.dump([self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list],
 					open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "wb"), protocol=4)
 		
 		pickle.dump([self.meta_embedding, self.D_list], open(os.path.join(self.path2result_dir, "results%s.pkl" % save_str), "wb"), protocol=4)
 		
 	
-	def fetch_cell_embedding(self, final_dim=None):
-		return parse_embedding(self.D_list, self.meta_embedding, dim=final_dim if final_dim is not None else self.rank)
-
+	def load_model(self, dim1=.6,
+				  rank=256,
+				  n_iter_parafac=1,
+				  extra=""):
+		save_str = "dim1_%.1f_rank_%d_niterp_%d_%s" % (dim1, rank, n_iter_parafac, extra)
+		data = pickle.load(open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "rb"))
+		self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list = data
+		
+	
+	def fetch_cell_embedding(self, final_dim=None, auto_correct=True, restore_order=False):
+		embed = parse_embedding(self.D_list, self.meta_embedding, dim=final_dim if final_dim is not None else self.rank)
+		if restore_order:
+			reorder_embed = np.zeros_like(embed)
+			reorder_embed[self.reorder] = embed
+			embed = reorder_embed
+			
+		embed_l2 = normalize(embed, axis=1)
+		if auto_correct:
+			if "batch_id" in self.config:
+				score_ori = self.eval_batch_mix(embed_l2)
+				embed_correct = self.correct_batch_linear(embed, self.coverage_feats)
+				embed_correct_l2 = normalize(embed_correct)
+				score_correct = self.eval_batch_mix(embed_correct_l2)
+				if np.max(score_ori - score_correct) > 0.01:
+					print ("linear regression of coverage seems to improve the batch mixing")
+					embed_prefer = embed_correct_l2
+				else:
+					embed_prefer = embed_l2
+		return {'prefer': embed_prefer, 'raw':embed, 'l2_norm_raw': embed_l2}
+			
+		
 	def correct_batch_linear(self, embedding, var_to_regress):
 		if len(var_to_regress.shape) == 1:
 			var_to_regress = var_to_regress.reshape((-1, 1))
 		from sklearn.linear_model import LinearRegression
-		embedding = embedding - LinearRegression().fit(var_to_regress, embedding).predict(embedding)
+		embedding = embedding - LinearRegression().fit(var_to_regress, embedding).predict(var_to_regress)
 		return embedding
 	
 if __name__ == '__main__':
 	print(time.ctime())
 	# parse all arguments
 	args = parse_args()
-	# config = get_config(args.config)
 	
-	
+	# initialize the model
 	wrapper = FastHigashi(config_path=args.config,
 				 path2input_cache=args.path2input_cache,
 				 path2result_dir=args.path2result_dir,
@@ -608,14 +693,31 @@ if __name__ == '__main__':
 				 do_rwr=args.do_rwr,
 				 do_col=args.do_col,
 				 no_col=args.no_col)
-
-	wrapper.prep_dataset()
-	wrapper.run_model(extra=args.extra, rank=256)
+	
+	# packing data from sparse matrices to
+	wrapper.prep_dataset(batch_norm=args.batch_norm)
+	wrapper.run_model(extra=args.extra, rank=args.rank)
+	
+	
+	# loading existing trained models
+	# wrapper.load_model(extra=args.extra, rank=args.rank)
+	
+	# only do partial_rwr for analysis purpose
 	# wrapper.only_partial_rwr()
-	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
-	#                  cell_feats1=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
-	#
-	# evaluate_combine(wrapper.sig_list, [slice(None)], wrapper.meta_embedding, project=wrapper.D_list, extra="linear", save_dir=wrapper.path2result_dir, with_CCA=False,
-	#                  label_info=wrapper.label_info,
-	#                  cell_feats1=wrapper.cell_feats1, log=None, number_only=False, save_fmt='png', linear_corr=True)
+	
+	# getting embedding
+	embed = wrapper.fetch_cell_embedding(final_dim=args.rank,
+	                                     auto_correct=True,
+	                                     restore_order=False)
+	# prefer stands for the embeddings that the algorithm think might perform the best
+	embed = embed['prefer']
+	
+	
+	# internal uses... code not uploaded
+	# try:
+	# 	from .evaluation import evaluate_combine
+	# except:
+	# 	from evaluation import evaluate_combine
+	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed, project=None, extra=args.cache_extra+"_"+args.extra+"", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
+	#                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
 	#

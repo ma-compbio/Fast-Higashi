@@ -6,6 +6,8 @@ import numpy as np
 from scipy.sparse import coo_matrix
 
 from scipy.ndimage import gaussian_filter
+from scipy.sparse import csr_matrix, save_npz, diags, eye, vstack
+from sklearn.linear_model import LinearRegression
 
 # Include VC / VC_SQRT norm
 class NormalizerBin:
@@ -110,24 +112,26 @@ def quantile_normalization(x, y):
 
 
 def calc_bulk(matrix_list):
-	shape = matrix_list[0].shape
-	nnz = sum(m.nnz for m in matrix_list)
-	indices = np.empty([3, nnz], dtype=np.int16)
-	values = np.empty([nnz], dtype=np.float32)
-	del nnz
-	idx_nnz = 0
-	for i, m in enumerate(tqdm(matrix_list)):
-		idx = slice(idx_nnz, idx_nnz + m.nnz)
-		indices[0, idx] = m.row
-		indices[1, idx] = m.col
-		values[idx] = m.data
-		idx_nnz += m.nnz
-		del idx, m
-	bulk = coo_matrix((values[:idx_nnz], tuple(indices[:2, :idx_nnz])), shape)
-	del idx_nnz
-	bulk = np.array(bulk.todense())
-	bulk /= len(matrix_list)
-	return bulk
+	# shape = matrix_list[0].shape
+	# nnz = sum(m.nnz for m in matrix_list)
+	# indices = np.empty([3, nnz], dtype=np.int16)
+	# values = np.empty([nnz], dtype=np.float32)
+	# del nnz
+	# idx_nnz = 0
+	# for i, m in enumerate(tqdm(matrix_list)):
+	# 	idx = slice(idx_nnz, idx_nnz + m.nnz)
+	# 	indices[0, idx] = m.row
+	# 	indices[1, idx] = m.col
+	# 	values[idx] = m.data
+	# 	idx_nnz += m.nnz
+	# 	del idx, m
+	# bulk = coo_matrix((values[:idx_nnz], tuple(indices[:2, :idx_nnz])), shape)
+	# del idx_nnz
+	# bulk = np.array(bulk.todense())
+	# bulk /= len(matrix_list)
+	# return bulk
+	bulk = sum_sparse(matrix_list)
+	return bulk / len(matrix_list)
 
 
 def normalize_by_coverage(m, mi=None, scale=None):
@@ -178,13 +182,111 @@ def normalize_per_cell(
 	for normalizer in normalizers:
 		normalizer.fit(matrix_list=matrix_list, bulk=bulk)
 		bulk = normalizer.transform(bulk)
-	for m, mi in zip(matrix_list, matrix_list_intra):
+	for i, (m, mi) in enumerate(zip(matrix_list, matrix_list_intra)):
 		for normalizer in normalizers:
 			normalizer.transform(m)
 		for func in per_cell_normalize_func:
 			m = func(m, mi)
-
+			matrix_list[i] = m
+			
 	return matrix_list
+
+
+def norm2(mtx_list, info, info2, bk_cov):
+	mtx_list, batch = mtx_list
+	for i, m in enumerate(mtx_list):
+		row, col, data = m.row, m.col, m.data
+		distance = np.abs(row - col).astype('int')
+		# if multihic:
+		# 	distance = np.ceil((np.sqrt(8 * distance + 1) - 1) / 2).astype('int')
+		ratio = info[batch[i]]
+		cov = info2[batch[i]]
+		data = data / (np.sqrt(cov[row]) * np.sqrt(cov[col])) * (np.sqrt(bk_cov[row]) * np.sqrt(bk_cov[col]))
+		
+		d = distance
+		# divided by batch ratio
+		new_data = data / (ratio[d] + 1e-15)
+		
+		m.data = new_data
+		mtx_list[i] = m
+		
+		
+		
+	return mtx_list
+
+
+def sum_sparse(m):
+	x = np.zeros(m[0].shape)
+	for a in m:
+		x[a.row, a.col] += a.data
+	return x
+def normalize_per_batch(matrix_list, batch_id):
+	info = {}
+	info2 = {}
+	matrix_list = np.array(matrix_list)
+	
+	bulk = sum_sparse(matrix_list)
+	
+	bk_cov = bulk.sum(axis=-1)
+	bulk /= (np.sqrt(bk_cov[None]) + 1e-15)
+	bulk /= (np.sqrt(bk_cov[:, None]) + 1e-15)
+	bk_sum = bulk.sum()
+	
+	import math
+	# max_size = int(math.ceil((math.sqrt(8*(bulk.shape[0]-1) + 1) - 1) / 2)) + 1
+	# if multihic:
+	# 	bulk_ratio = np.zeros((max_size))
+	# else:
+	bulk_ratio = np.zeros((bulk.shape[-1]))
+	for k in range(bulk.shape[0]):
+		a = np.diagonal(bulk,k).sum() if k==0 else np.diagonal(bulk,k).sum() * 2
+		# id_ = int(math.ceil((math.sqrt(8*k + 1) - 1) / 2)) if multihic else k
+		id_ = k
+		bulk_ratio[id_] += a
+		
+	bulk_ratio = np.array(bulk_ratio) / bk_sum
+	
+
+	for b in np.unique(batch_id):
+		m = matrix_list[batch_id == b]
+		m = sum_sparse(m)
+		m_cov = m.sum(axis=-1)
+		#
+		m = m / (np.sqrt(m_cov[None]) + 1e-15)
+		m = m / (np.sqrt(m_cov[:, None]) + 1e-15)
+		#
+		m_sum = m.sum()
+		
+		# if multihic:
+		# 	ratio = np.zeros((max_size))
+		# else:
+		ratio = np.zeros((bulk.shape[-1]))
+		for k in range(bulk.shape[0]):
+			a = np.diagonal(m, k).sum() if k == 0 else np.diagonal(m, k).sum() * 2
+			# id_ = int(math.ceil((math.sqrt(8 * k + 1) - 1) / 2)) if multihic else k
+			id_ = k
+			ratio[id_] += a
+			
+		ratio = np.array(ratio) / (m_sum + 1e-15)
+		
+		info[b] = ratio / (bulk_ratio + 1e-15)
+		info2[b] = np.array(m_cov)
+		
+		
+	from tqdm.contrib.concurrent import process_map
+	from functools import partial
+	
+	func = partial(norm2, info=info, info2=info2, bk_cov=bk_cov)
+	batch_num = int(len(matrix_list) / 1000)
+	
+	matrix_list = np.array_split(matrix_list, batch_num)
+	batch_id = np.array_split(batch_id, batch_num)
+	matrix_list = process_map(func, zip(matrix_list,batch_id), max_workers=batch_num, total=len(matrix_list))
+	matrix_list = np.concatenate(matrix_list, axis=0)
+	
+	
+	
+	return list(matrix_list)
 
 
 def reformat_input(matrix_list, config, valid_bin=None, off_diag=None, fac_size=None, loss_distribution='Gaussian', sparse=False):

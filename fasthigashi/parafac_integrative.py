@@ -108,6 +108,6 @@ def parafac(
 		balance_norm(factors)
 		
 	del X
-	print(f"{len(history)}, {wdiff:.1e};", end=' ')
+	# print(f"{len(history)}, {wdiff:.1e};", end=' ')
 	return factors, history[-1]['loss norm'], history[-1]['loss x']
 

@@ -28,7 +28,6 @@ def rec2tilte(x, strips):
 	
 	a = torch.zeros(x.shape[0], x.shape[1], x.shape[1]+strips).float().to(x.device)
 	a[:, index_dim0[filter], index_dim1[filter]] = x[:, index_dim0[filter], index_dim1_[filter]]
-	# print(x.shape, a.shape, x[0], a[0])
 	return a
 
 def tilte2rec(x, strips):
@@ -41,7 +40,6 @@ def tilte2rec(x, strips):
 	
 	a = torch.zeros(x.shape[0], x.shape[1], strips).float().to(x.device)
 	a[:, index_dim0[filter], index_dim1_[filter]] = x[:, index_dim0[filter], index_dim1[filter]]
-	# print(x.shape, a.shape, x[0], a[0])
 	return a
 
 @torch.no_grad()
@@ -53,6 +51,7 @@ def partial_rwr(x: torch.Tensor,
                 do_rwr:bool,
                 do_col:bool,
                 bin_cov:torch.Tensor=torch.ones(1),
+                bin_cov_row:torch.Tensor=torch.ones(1),
                 return_rwr_iter:bool=False,
                 force_rwr_epochs:int=-1,
                 final_transpose:bool=True,

@@ -6,7 +6,7 @@ from scipy.sparse._sparsetools import coo_tocsr
 from scipy.sparse import coo_matrix, csr_matrix
 import torch
 from typing import Dict, List, Tuple
-
+from tqdm import tqdm, trange
 #TODO: use numpy.unravel_index
 
 gpu_flag = torch.cuda.is_available()
@@ -327,25 +327,26 @@ class Fake_Sparse:
 		self.shape = [shape[0]+2, shape[1]+2, shape[2]]
 		
 		if gpu_flag:
-			self.indices = [torch.tensor(indices[0]+1, dtype=torch.long).pin_memory(),
-			                torch.tensor(indices[1]+1, dtype=torch.long).pin_memory(),
-			                torch.tensor(indices[2], dtype=torch.long).pin_memory()]
+			self.indices = [torch.tensor(indices[0]+1, dtype=torch.short).pin_memory(),
+			                torch.tensor(indices[1]+1, dtype=torch.short).pin_memory(),
+			                torch.tensor(indices[2], dtype=torch.int).pin_memory()]
 			self.values = torch.tensor(values, dtype=torch.float32).pin_memory()#[mask]
-			
+
 		else:
-			self.indices = [torch.tensor(indices[0]+1, dtype=torch.long).contiguous(),
-			                torch.tensor(indices[1]+1, dtype=torch.long).contiguous(),
-			                torch.tensor(indices[2], dtype=torch.long).contiguous()]
+			self.indices = [torch.tensor(indices[0]+1, dtype=torch.int).contiguous(),
+			                torch.tensor(indices[1]+1, dtype=torch.int).contiguous(),
+			                torch.tensor(indices[2], dtype=torch.int).contiguous()]
 			self.values = torch.tensor(values, dtype=torch.float32).contiguous()  # [mask]
-	
+		
+		
 	def compress(self, flank):
 		print ("compressing")
 		self.shape = [self.shape[0], self.shape[0] + 2 * flank, self.shape[2]]
 		self.indices[1] = self.indices[1] - self.slice_.start + flank
 		
 	def pin_memory(self):
-		# self.values = self.values.pin_memory()
-		# self.indices = [_.pin_memory() for _ in self.indices]
+		self.values = self.values.pin_memory()
+		self.indices = [_.pin_memory() for _ in self.indices]
 		return self
 	
 	def densify(self, save_context, transpose=False, do_conv=False, out=None):
@@ -498,8 +499,8 @@ class Chrom_Dataset:
 				storage[count].append(Fake_Sparse(slice(i, i+shape[0]), local_indices, local_values, local_shape))
 				storage_kind[count].append(kind)
 				
+				
 			count += 1
-		
 		
 		self.num_bin_batch = len(self.tensor_list)
 		self.num_cell_batch = len(self.tensor_list[0])

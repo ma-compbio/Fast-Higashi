@@ -40,10 +40,11 @@ def summarize_a_tensor(ts, name):
 	
 class Fast_Higashi_core():
 	
-	def __init__(self, rank):
+	def __init__(self, rank, off_diag):
 		self.rank = rank
 
 		self.sparse_conv = False
+		self.off_diag = off_diag
 		# print ("sparse conv", self.sparse_conv)
 		self.device = torch.device("cpu")
 		
@@ -73,6 +74,7 @@ class Fast_Higashi_core():
 		B_dict = {chrom: torch.eye(size, **context).add_(torch.randn(size, **context), alpha=1e-2)
 			for chrom, size in self.chrom2size.items()}
 		
+		C = None
 		
 		print(f'time elapsed: {time.perf_counter() - _t:.2f}')
 		sys.stdout.flush()
@@ -82,18 +84,36 @@ class Fast_Higashi_core():
 		feats_for_SVD = {chrom: [] for chrom in self.chrom2size}
 		
 		for chrom_data in tqdm(schic, desc="initializing params"):
+			if C is None:
+				C = np.empty((chrom_data.num_cell, cum_size_list[-1]))
+				C_start = 0
 			n_i_list = []
 			bin_cov = torch.ones([chrom_data.num_cell, chrom_data.num_bin],
 			                     dtype=torch.float32, device='cpu') * 1e-4
 			bad_bin_cov = torch.ones([chrom_data.total_cell_num - chrom_data.num_cell, chrom_data.num_bin],
 			                         dtype=torch.float32, device='cpu') * 1e-4
 			# for bin_index in range(0, chrom_data.shape[0], chrom_data.bs_bin):
+			
+			num_bin_1m = int(math.ceil(chrom_data.num_bin * chrom_data.resolution / 1000000))
+			size1 = min(int(math.ceil(chrom_data.num_bin / chrom_data.num_bin_batch *
+			                          chrom_data.resolution / 1000000)) + 2 * self.off_diag + 1,
+			            num_bin_1m)
+			feats_dim = int(math.ceil(num_bin_1m * size1))
+			
+			feats = np.empty((chrom_data.num_cell, feats_dim))
+			
+			ll = int(1000000 / chrom_data.resolution)
+			if ll > 1:
+				conv_filter = torch.ones(1, 1, ll, ll).to(self.device) / (ll * ll)
+				conv_flag = True
+			else:
+				conv_flag = False
+			feats_start = 0
 			for bin_batch_id in range(0, chrom_data.num_bin_batch):
 				slice_ = chrom_data.bin_slice_list[bin_batch_id]
 				slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
 				slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
-				feat = []
-
+				# feat = []
 				for cell_batch_id in range(0, chrom_data.num_cell_batch):
 					slice_cell = chrom_data.cell_slice_list[cell_batch_id]
 					chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
@@ -101,6 +121,7 @@ class Fast_Higashi_core():
 					                                          transpose=True,
 					                                          do_conv=do_conv if self.sparse_conv else False)
 					chrom_batch_cell_batch, t = chrom_batch_cell_batch
+					# here it's always, cell, row, col
 					if kind == 'hic':
 						chrom_batch_cell_batch, n_i = partial_rwr(chrom_batch_cell_batch,
 						                                      slice_start=slice_local.start,
@@ -116,32 +137,31 @@ class Fast_Higashi_core():
 						bin_cov[slice_cell, slice_col] += b_c.detach().cpu()
 						n_i_list.append(n_i)
 						
-						ll = int(1000000 / chrom_data.resolution)
-						if ll > 1:
-							conv_filter = torch.ones(1, 1, ll, ll).to(self.device) / (ll * ll)
-							B = F.conv2d(chrom_batch_cell_batch[:, None, :, :].to(self.device), conv_filter.to(self.device),
+						if conv_flag:
+							B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
 							             stride=ll)[:, 0, :, :]
 						else:
 							B = chrom_batch_cell_batch
 						
-						feat.append(
-							B.cpu().numpy())
+						# feat.append(
+						# 	B.cpu().numpy())
+						B = B.cpu().numpy().reshape((len(B), -1))
+						feats[slice_cell, feats_start:feats_start+B.shape[-1]] = B
 					
-					
-					else:
-						feat.append(chrom_batch_cell_batch.permute(2, 0, 1).cpu().numpy().reshape(chrom_batch_cell_batch.shape[2], -1))
+					# else:
+					# 	feat.append(chrom_batch_cell_batch.permute(2, 0, 1).cpu().numpy().reshape(chrom_batch_cell_batch.shape[2], -1))
 					del chrom_batch_cell_batch
-					
+				feats_start += B.shape[-1]
 				gc.collect()
 				try:
 					torch.cuda.empty_cache()
 				except:
 					pass
 				
-				if len(feat) > 0:
-					feat = np.concatenate(feat, axis=0)
-					feat = feat.reshape((len(feat), -1))
-					feats_for_SVD[chrom_data.chrom].append(feat)
+				# if len(feat) > 0:
+				# 	feat = np.concatenate(feat, axis=0)
+				# 	feat = feat.reshape((len(feat), -1))
+				# 	feats_for_SVD[chrom_data.chrom].append(feat)
 				
 				for cell_batch_id in range(0, chrom_data.num_cell_batch_bad):
 					slice_cell = chrom_data.cell_slice_list[cell_batch_id + chrom_data.num_cell_batch]
@@ -165,8 +185,16 @@ class Fast_Higashi_core():
 						                                        final_transpose=False)
 						b_c = chrom_batch_cell_batch.sum(1)
 						bad_bin_cov[slice_cell, slice_col] += b_c.detach().cpu()
-				
-				
+			
+			
+			# feats_for_SVD[chrom_data.chrom] = np.concatenate(feats_for_SVD[chrom_data.chrom], axis=1)
+			size = self.chrom2size[chrom_data.chrom]
+			svd = TruncatedSVD(n_components=size, n_iter=2)
+			temp = svd.fit_transform(feats[:, :feats_start])
+			# del feats
+			C[:, C_start:C_start+temp.shape[-1]] = temp
+			C_start += temp.shape[-1]
+			
 			n_i_all.append(np.max(n_i_list) if len(n_i_list) > 0 else 0)
 			if type(bin_cov) is not float:
 				bin_cov[bin_cov <= 1e-4] = float('inf')
@@ -183,16 +211,10 @@ class Fast_Higashi_core():
 		n_i_all = np.array(n_i_all)
 		self.n_i = np.array(n_i_all)
 		
-		C = []
+		
 		print("rwr iters:", self.n_i)
-		for chrom in self.chrom2size:
-			feats_for_SVD[chrom] = np.concatenate(feats_for_SVD[chrom], axis=1)
-			size = self.chrom2size[chrom]
-			svd = TruncatedSVD(n_components=size, n_iter=2)
-			temp = svd.fit_transform(feats_for_SVD[chrom])
-			del feats_for_SVD[chrom]
-			C.append(torch.from_numpy(temp).float())
-		C = torch.cat(C, dim=1)
+		print (C, np.sum(np.isnan(C)))
+		C = torch.from_numpy(C).float()
 		U, S, Vh = torch.linalg.svd(C.to(self.device), full_matrices=False)
 		meta_embedding = U[:, :rank]
 		SVh = Vh[:rank].mul_(S[:rank, None])
@@ -201,7 +223,6 @@ class Fast_Higashi_core():
 			for chrom, start, stop in zip(list(self.chrom2size.keys()), cum_size_list[:-1], cum_size_list[1:])
 		}
 		del C
-		
 		
 		print(f'time elapsed: {time.perf_counter() - _t:.2f}')
 		sys.stdout.flush()
@@ -274,9 +295,10 @@ class Fast_Higashi_core():
 						                                     do_rwr=do_rwr,
 						                                     do_col=do_col,
 						                                     bin_cov=bin_cov[slice_cell, slice_col],
+						                                     bin_cov_row=bin_cov[slice_cell, slice_],
 						                                     force_rwr_epochs=self.n_i[chrom_index])
 					
-					
+						
 					if first_iter:
 						rec_error_tensor_norm[chrom_index] += torch.linalg.norm(chrom_batch_cell_batch).square_().item()
 					
@@ -362,6 +384,7 @@ class Fast_Higashi_core():
 							                                         do_rwr=do_rwr,
 							                                         do_col=do_col,
 							                                         bin_cov=bin_cov[slice_cell, slice_col],
+							                                         bin_cov_row=bin_cov[slice_cell, slice_],
 							                                         force_rwr_epochs=self.n_i[chrom_index]
 							                                         )
 						else:
@@ -418,6 +441,7 @@ class Fast_Higashi_core():
 						                                      do_rwr=do_rwr,
 						                                      do_col=do_col,
 						                                      bin_cov=bin_cov[slice_cell, slice_col],
+						                                      bin_cov_row=bin_cov[slice_cell, slice_],
 						                                      force_rwr_epochs=self.n_i[chrom_index])
 						partial_rwr_time += t1
 					
@@ -694,6 +718,7 @@ class Fast_Higashi_core():
 						                                         do_rwr=do_rwr,
 						                                         do_col=do_col,
 						                                         bin_cov=bin_cov[slice_cell, slice_col],
+						                                         bin_cov_row=bin_cov[slice_cell, slice_],
 						                                         force_rwr_epochs=self.n_i[chrom_index])
 						
 					projected = torch.bmm(U.transpose(-1, -2), chrom_batch_cell_batch)
@@ -717,6 +742,7 @@ class Fast_Higashi_core():
 						                                         do_rwr=do_rwr,
 						                                         do_col=do_col,
 						                                         bin_cov=bad_bin_cov[slice_cell, slice_col],
+						                                         bin_cov_row=bad_bin_cov[slice_cell, slice_],
 						                                         force_rwr_epochs=self.n_i[chrom_index])
 					
 					projected = torch.bmm(U.transpose(-1, -2), chrom_batch_cell_batch)
