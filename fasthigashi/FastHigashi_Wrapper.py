@@ -10,12 +10,12 @@ from sklearn.preprocessing import normalize
 
 try:
 	from .parafac2_intergrative import Fast_Higashi_core
-	from .preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, SQRT_VC, normalize_per_batch
+	from .preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, normalize_per_batch
 	from .sparse_for_schic import Sparse, Chrom_Dataset
 except:
 	try:
 		from parafac2_intergrative import Fast_Higashi_core
-		from preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, SQRT_VC, normalize_per_batch
+		from preprocessing import calc_bulk, filter_bin, normalize_per_cell, normalize_by_coverage, Clip, normalize_per_batch
 		from sparse_for_schic import Sparse, Chrom_Dataset
 	except:
 		raise EOFError
@@ -657,6 +657,7 @@ class FastHigashi():
 			embed = reorder_embed
 			
 		embed_l2 = normalize(embed, axis=1)
+		embed_prefer = embed_l2
 		if auto_correct:
 			if "batch_id" in self.config:
 				score_ori = self.eval_batch_mix(embed_l2)
@@ -666,8 +667,8 @@ class FastHigashi():
 				if np.max(score_ori - score_correct) > 0.01:
 					print ("linear regression of coverage seems to improve the batch mixing")
 					embed_prefer = embed_correct_l2
-				else:
-					embed_prefer = embed_l2
+					
+		
 		return {'prefer': embed_prefer, 'raw':embed, 'l2_norm_raw': embed_l2}
 			
 		
@@ -714,10 +715,9 @@ if __name__ == '__main__':
 	
 	
 	# internal uses... code not uploaded
-	# try:
-	# 	from .evaluation import evaluate_combine
-	# except:
-	# 	from evaluation import evaluate_combine
-	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed, project=None, extra=args.cache_extra+"_"+args.extra+"", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
-	#                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
-	#
+	try:
+		from .evaluation import evaluate_combine
+	except:
+		from evaluation import evaluate_combine
+	evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed, project=None, extra=args.cache_extra+"_"+args.extra+"", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
+	                 coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)

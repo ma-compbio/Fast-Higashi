@@ -213,7 +213,6 @@ class Fast_Higashi_core():
 		
 		
 		print("rwr iters:", self.n_i)
-		print (C, np.sum(np.isnan(C)))
 		C = torch.from_numpy(C).float()
 		U, S, Vh = torch.linalg.svd(C.to(self.device), full_matrices=False)
 		meta_embedding = U[:, :rank]
