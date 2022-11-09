@@ -619,7 +619,7 @@ class FastHigashi():
 			do_conv=self.do_conv,
 			do_rwr=self.do_rwr,
 			do_col=self.final_do_col,
-			tol=3.0e-5,
+			tol=3.0e-4,
 			gpu_id=self.gpu_id
 		)
 		print("takes: %.2f s" % (time.time() - start))
