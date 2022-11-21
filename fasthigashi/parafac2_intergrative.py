@@ -21,8 +21,11 @@ import torch.nn.functional as F
 ## matmul(meta_embedding, D) are also referred to as C
 ## size_list: list of r
 ## rank: R
-gpu_flag = torch.cuda.is_available()
+def pass_(x, **kwargs):
+	return x
 
+gpu_flag = torch.cuda.is_available()
+progressbar = pass_
 def save_to_device(model_param, temp_var):
 	if model_param is None or model_param is temp_var: return
 	model_param[:] = temp_var.to(model_param.device)
@@ -40,11 +43,12 @@ def summarize_a_tensor(ts, name):
 	
 class Fast_Higashi_core():
 	
-	def __init__(self, rank, off_diag):
+	def __init__(self, rank, off_diag, res_list):
 		self.rank = rank
 
 		self.sparse_conv = False
 		self.off_diag = off_diag
+		self.res_list = res_list
 		# print ("sparse conv", self.sparse_conv)
 		self.device = torch.device("cpu")
 		
@@ -53,9 +57,9 @@ class Fast_Higashi_core():
 		return self
 	
 	@torch.no_grad()
-	def init_params(self, schic, do_conv, do_rwr):
+	def init_params(self, schic, do_conv, do_rwr, do_col):
 		rank = self.rank
-		uniq_size_list = list(self.chrom2size.values())
+		uniq_size_list = list(self.chrom2size.values()) * len(self.res_list)
 		_t = time.perf_counter()
 		context = dict(device=self.device, dtype=torch.float32)
 		context_cpu = dict(device='cpu', dtype=torch.float32)
@@ -102,7 +106,7 @@ class Fast_Higashi_core():
 			
 			feats = np.empty((chrom_data.num_cell, feats_dim))
 			
-			ll = int(1000000 / chrom_data.resolution)
+			ll = int(math.ceil(1000000 / chrom_data.resolution))
 			if ll > 1:
 				conv_filter = torch.ones(1, 1, ll, ll).to(self.device) / (ll * ll)
 				conv_flag = True
@@ -137,21 +141,28 @@ class Fast_Higashi_core():
 						bin_cov[slice_cell, slice_col] += b_c.detach().cpu()
 						n_i_list.append(n_i)
 						
-						if conv_flag:
-							B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
-							             stride=ll)[:, 0, :, :]
-						else:
-							B = chrom_batch_cell_batch
+						if not do_col:
 						
-						# feat.append(
-						# 	B.cpu().numpy())
-						B = B.cpu().numpy().reshape((len(B), -1))
-						feats[slice_cell, feats_start:feats_start+B.shape[-1]] = B
-					
+							if conv_flag:
+								B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
+								             stride=ll)[:, 0, :, :]
+							else:
+								B = chrom_batch_cell_batch
+							
+							# feat.append(
+							# 	B.cpu().numpy())
+							B = B.cpu().numpy().reshape((len(B), -1))
+							try:
+								feats[slice_cell, feats_start:feats_start+B.shape[-1]] = B
+							except Exception as e:
+								print (B.shape, feats_start, feats_dim, num_bin_1m, chrom_data.resolution, chrom_data.num_bin, chrom_data.chrom)
+								print (e)
+								raise e
 					# else:
 					# 	feat.append(chrom_batch_cell_batch.permute(2, 0, 1).cpu().numpy().reshape(chrom_batch_cell_batch.shape[2], -1))
 					del chrom_batch_cell_batch
-				feats_start += B.shape[-1]
+				if not do_col:
+					feats_start += B.shape[-1]
 				gc.collect()
 				try:
 					torch.cuda.empty_cache()
@@ -185,8 +196,55 @@ class Fast_Higashi_core():
 						                                        final_transpose=False)
 						b_c = chrom_batch_cell_batch.sum(1)
 						bad_bin_cov[slice_cell, slice_col] += b_c.detach().cpu()
-			
-			
+			if do_col:
+				for bin_batch_id in range(0, chrom_data.num_bin_batch):
+					slice_ = chrom_data.bin_slice_list[bin_batch_id]
+					slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
+					slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
+					# feat = []
+					for cell_batch_id in range(0, chrom_data.num_cell_batch):
+						slice_cell = chrom_data.cell_slice_list[cell_batch_id]
+						chrom_batch_cell_batch, kind = chrom_data.fetch(bin_batch_id, cell_batch_id,
+						                                                save_context=dict(device=self.device),
+						                                                transpose=True,
+						                                                do_conv=do_conv if self.sparse_conv else False)
+						chrom_batch_cell_batch, t = chrom_batch_cell_batch
+						# here it's always, cell, row, col
+						if kind == 'hic':
+							chrom_batch_cell_batch, n_i = partial_rwr(chrom_batch_cell_batch,
+							                                          slice_start=slice_local.start,
+							                                          slice_end=slice_local.stop,
+							                                          do_conv=False if self.sparse_conv else do_conv,
+							                                          do_rwr=do_rwr,
+							                                          do_col=do_col,
+							                                          bin_cov=bin_cov[slice_cell, slice_col],
+							                                          return_rwr_iter=True,
+							                                          force_rwr_epochs=-1,
+							                                          final_transpose=False)
+							
+							
+							if conv_flag:
+								B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
+								             stride=ll)[:, 0, :, :]
+							else:
+								B = chrom_batch_cell_batch
+							
+							# feat.append(
+							# 	B.cpu().numpy())
+							B = B.cpu().numpy().reshape((len(B), -1))
+							feats[slice_cell, feats_start:feats_start + B.shape[-1]] = B
+						
+						# else:
+						# 	feat.append(chrom_batch_cell_batch.permute(2, 0, 1).cpu().numpy().reshape(chrom_batch_cell_batch.shape[2], -1))
+						del chrom_batch_cell_batch
+					feats_start += B.shape[-1]
+					gc.collect()
+					try:
+						torch.cuda.empty_cache()
+					except:
+						pass
+					
+					
 			# feats_for_SVD[chrom_data.chrom] = np.concatenate(feats_for_SVD[chrom_data.chrom], axis=1)
 			size = self.chrom2size[chrom_data.chrom]
 			svd = TruncatedSVD(n_components=size, n_iter=2)
@@ -258,7 +316,7 @@ class Fast_Higashi_core():
 		
 						
 		for chrom_index, (chrom_data, A, projection, bin_cov) in enumerate(zip(
-				tqdm(schic), A_list, projection_list,
+				progressbar(schic), A_list, projection_list,
 				bin_cov_list
 		)):
 			B = B_dict[chrom_data.chrom]
@@ -309,6 +367,7 @@ class Fast_Higashi_core():
 					_t = time.perf_counter()
 					# rhs: bs_bin, # bin2, cell
 					rhs = chrom_batch_cell_batch.to(device)
+					
 					if temp is None:
 						temp = torch.bmm(rhs, lhs)
 					else:
@@ -323,8 +382,11 @@ class Fast_Higashi_core():
 				# Here, temp is shape of (bs_bin, total_bin, r)
 				# bs_bin < 200, r ~ 100, total_bin can goes up to 2280, so...
 				svd_device = 'cpu' if temp.shape[1] <= 700 else device
-				U, S = project2orthogonal(temp.to(svd_device), temp.shape[-1], compute_device=device)
-				
+				try:
+					U, S = project2orthogonal(temp.to(svd_device), temp.shape[-1], compute_device=device)
+				except:
+					U, S = project2orthogonal_ill(temp.to(svd_device), temp.shape[-1], compute_device=device)
+					
 				svd_time += time.perf_counter() - _t
 				_t = time.perf_counter()
 			
@@ -414,7 +476,7 @@ class Fast_Higashi_core():
 		rec_error_x_V += meta_embedding.mul(SVD_term.T).sum().item()
 		
 		for chrom_index, (chrom_data, projection, bin_cov) in enumerate(
-				zip(tqdm(schic), projection_list, bin_cov_list)):
+				zip(progressbar(schic), projection_list, bin_cov_list)):
 			
 			for bin_batch_id in range(0, chrom_data.num_bin_batch):
 				gather_project = 0
@@ -519,7 +581,7 @@ class Fast_Higashi_core():
 		
 		del size_list
 		
-		self.init_params(schic, do_conv, do_rwr)
+		self.init_params(schic, do_conv, do_rwr, do_col)
 		rec_errors = []
 		rec_errors_total = []
 		
@@ -548,7 +610,7 @@ class Fast_Higashi_core():
 		rec_error_core_norm = np.zeros([len(schic), 1])
 		
 		for chrom_index, (chrom_data, A, re_c, bin_cov) in enumerate(zip(
-				tqdm(schic), self.A_list, rec_error_core_norm, self.bin_cov_list)):
+				progressbar(schic), self.A_list, rec_error_core_norm, self.bin_cov_list)):
 			B = self.B_dict[chrom_data.chrom]
 			D = self.D_dict[chrom_data.chrom]
 			for i in range(0, chrom_data.num_bin, chrom_data.bs_bin):
@@ -559,8 +621,10 @@ class Fast_Higashi_core():
 				del c
 		
 		rec_error_tensor_norm = None
-		
 		for iteration in range(n_iter_max):
+			if (iteration % 10) == 0 and iteration > 0 and n_iter_parafac < 5:
+				n_iter_parafac += 1
+				# print ("n_iter_para", n_iter_parafac)
 			print("Starting iteration", iteration)
 			sys.stdout.flush()
 			
@@ -621,7 +685,7 @@ class Fast_Higashi_core():
 			
 			rec_error_core_norm = np.zeros([len(schic), 1])
 			for chrom_index, (chrom_data, A, re_c, bin_cov) in enumerate(zip(
-					tqdm(schic), self.A_list, rec_error_core_norm, self.bin_cov_list)):
+					progressbar(schic), self.A_list, rec_error_core_norm, self.bin_cov_list)):
 				B = self.B_dict[chrom_data.chrom]
 				D = self.D_dict[chrom_data.chrom]
 				for i in range(0, chrom_data.num_bin, chrom_data.bs_bin):
@@ -649,6 +713,7 @@ class Fast_Higashi_core():
 					f"max{differences.max().item():.1e} at chrom {differences.argmax().item():d}",
 					f"takes {time.time() - start_time:.1f}s"
 				)
+				# if iteration >= 3 and tol > 0 and (total_differences < tol or differences.max() < tol * 2):
 				if iteration >= 3 and tol > 0 and (total_differences < tol or differences.max() < tol * 2):
 					print('converged in {} iterations.'.format(iteration))
 					break
@@ -682,7 +747,7 @@ class Fast_Higashi_core():
 		
 		
 		for chrom_index, (chrom_data, A, projection, bin_cov, bad_bin_cov) in enumerate(zip(
-				tqdm(schic), self.A_list, projection_list,
+				progressbar(schic), self.A_list, projection_list,
 				bin_cov_list, bad_bin_cov_list
 		)):
 			B = self.B_dict[chrom_data.chrom]
@@ -762,7 +827,7 @@ class Fast_Higashi_core():
 	                  do_conv=True, do_rwr=False, do_col=False, tol=1e-8,
 	                  size_list = None, gpu_id=None,
 	                  verbose=True):
-		
+		print ("n_iter_parafac", n_iter_parafac)
 		self.fit(schic, size_ratio,
 	                  n_iter_max, n_iter_parafac,
 	                  do_conv, do_rwr, do_col, tol,

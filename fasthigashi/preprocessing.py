@@ -194,7 +194,7 @@ def normalize_per_cell(
 
 def norm2(mtx_list, info, info2, bk_cov):
 	mtx_list, batch = mtx_list
-	for i, m in enumerate(mtx_list):
+	for i, m in enumerate(tqdm(mtx_list)):
 		row, col, data = m.row, m.col, m.data
 		distance = np.abs(row - col).astype('int')
 		# if multihic:
@@ -220,13 +220,19 @@ def sum_sparse(m):
 	for a in m:
 		x[a.row, a.col] += a.data
 	return x
-def normalize_per_batch(matrix_list, batch_id):
+
+
+def sum_sparse_by_batch_id(m_list, batch):
+	avail_batch = np.unique(batch)
+	return_dict = {b:np.zeros(m_list[0].shape) for b in avail_batch}
+	for a,b in zip(m_list, batch):
+		return_dict[b][a.row, a.col] += a.data
+	return return_dict
+
+def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 	info = {}
 	info2 = {}
 	matrix_list = np.array(matrix_list)
-	
-	bulk = sum_sparse(matrix_list)
-	
 	bk_cov = bulk.sum(axis=-1)
 	bulk /= (np.sqrt(bk_cov[None]) + 1e-15)
 	bulk /= (np.sqrt(bk_cov[:, None]) + 1e-15)
@@ -237,19 +243,16 @@ def normalize_per_batch(matrix_list, batch_id):
 	# if multihic:
 	# 	bulk_ratio = np.zeros((max_size))
 	# else:
-	bulk_ratio = np.zeros((bulk.shape[-1]))
-	for k in range(bulk.shape[0]):
+	bulk_ratio = np.zeros((off_diag))
+	for k in range(off_diag):
 		a = np.diagonal(bulk,k).sum() if k==0 else np.diagonal(bulk,k).sum() * 2
 		# id_ = int(math.ceil((math.sqrt(8*k + 1) - 1) / 2)) if multihic else k
 		id_ = k
 		bulk_ratio[id_] += a
 		
 	bulk_ratio = np.array(bulk_ratio) / bk_sum
-	
-
-	for b in np.unique(batch_id):
-		m = matrix_list[batch_id == b]
-		m = sum_sparse(m)
+	for b in batch_bulk.keys():
+		m = batch_bulk[b]
 		m_cov = m.sum(axis=-1)
 		#
 		m = m / (np.sqrt(m_cov[None]) + 1e-15)
@@ -260,8 +263,8 @@ def normalize_per_batch(matrix_list, batch_id):
 		# if multihic:
 		# 	ratio = np.zeros((max_size))
 		# else:
-		ratio = np.zeros((bulk.shape[-1]))
-		for k in range(bulk.shape[0]):
+		ratio = np.zeros((off_diag))
+		for k in range(off_diag):
 			a = np.diagonal(m, k).sum() if k == 0 else np.diagonal(m, k).sum() * 2
 			# id_ = int(math.ceil((math.sqrt(8 * k + 1) - 1) / 2)) if multihic else k
 			id_ = k
@@ -271,20 +274,20 @@ def normalize_per_batch(matrix_list, batch_id):
 		
 		info[b] = ratio / (bulk_ratio + 1e-15)
 		info2[b] = np.array(m_cov)
-		
-		
+
 	from tqdm.contrib.concurrent import process_map
-	from functools import partial
-	
-	func = partial(norm2, info=info, info2=info2, bk_cov=bk_cov)
-	batch_num = int(len(matrix_list) / 1000)
-	
-	matrix_list = np.array_split(matrix_list, batch_num)
-	batch_id = np.array_split(batch_id, batch_num)
-	matrix_list = process_map(func, zip(matrix_list,batch_id), max_workers=batch_num, total=len(matrix_list))
-	matrix_list = np.concatenate(matrix_list, axis=0)
-	
-	
+	# from functools import partial
+	from multiprocessing import Pool
+
+	# func = partial(norm2, info=info, info2=info2, bk_cov=bk_cov)
+	# batch_num = int(len(matrix_list) / 250)
+	matrix_list = norm2((matrix_list, batch_id), info, info2, bk_cov)
+	# matrix_list = np.array_split(matrix_list, batch_num)
+	# batch_id = np.array_split(batch_id, batch_num)
+	# # p = Pool(batch_num)
+	# matrix_list = process_map(func, zip(matrix_list,batch_id), max_workers=batch_num, total=len(matrix_list))
+	# # matrix_list = p.map(func, zip(matrix_list,batch_id))
+	# matrix_list = np.concatenate(matrix_list, axis=0)
 	
 	return list(matrix_list)
 
@@ -476,7 +479,7 @@ def filter_bin(matrix_list=None, bulk=None, is_sym=True):
 		m = np.cumsum(v) - 1
 		m[~v] = -1
 		n = v.sum()
-		print(f'{n} out of {len(c)} bins are valid')
+		# print(f'{n} out of {len(c)} bins are valid')
 		return m, n, v
 	bin_id_mapping_row, num_bins_row, v_row = get_mapping(bulk.sum(1), bulk.shape[1])
 	if is_sym:

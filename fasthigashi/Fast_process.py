@@ -4,24 +4,21 @@ import os
 import numpy as np
 import torch
 import torch.nn.functional as F
-from tqdm import tqdm, trange
+from tqdm.auto import tqdm, trange
 from scipy.sparse import csr_matrix, vstack, SparseEfficiencyWarning, diags, \
 	hstack
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import h5py, math
 import pandas as pd
 
-from sklearn.decomposition import PCA, TruncatedSVD
-from sklearn.preprocessing import StandardScaler
-from sklearn.preprocessing import normalize
-import subprocess
-from scipy.ndimage import gaussian_filter
-
-try:
-	get_ipython()
-	from tqdm.notebook import tqdm, trange
-except:
-	pass
+# try:
+# 	get_ipython()
+# 	print ("jupyter notebook mode")
+# 	from tqdm.notebook import tqdm, trange
+# except Exception as e:
+# 	print (e)
+# 	print ("terminal mode")
+# 	pass
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
@@ -95,29 +92,27 @@ def generate_chrom_start_end(config):
 
 
 def data2mtx(config, file, chrom_start_end, verbose, cell_id):
-	if "header_included" in config:
-		if config['header_included']:
-			tab = pd.read_table(file, sep="\t")
+	if type(file) is str:
+		if "header_included" in config:
+			if config['header_included']:
+				tab = pd.read_table(file, sep="\t")
+			else:
+				tab = pd.read_table(file, sep="\t", header=None)
+				tab.columns = config['contact_header']
 		else:
 			tab = pd.read_table(file, sep="\t", header=None)
 			tab.columns = config['contact_header']
+		if 'count' not in tab.columns:
+			tab['count'] = 1
 	else:
-		tab = pd.read_table(file, sep="\t", header=None)
-		tab.columns = config['contact_header']
-	if 'count' not in tab.columns:
-		tab['count'] = 1
-	
-	if 'downsample' in config:
-		downsample = config['downsample']
-	else:
-		downsample = 1.0
+		tab = file
 	
 	data = tab
 	# fetch info from config
 	res = config['resolution']
 	chrom_list = config['chrom_list']
 	
-	data = data[(data['chrom1'] == data['chrom2']) & (np.abs(data['pos2'] - data['pos1']) >= 2500)]
+	data = data[(data['chrom1'] == data['chrom2']) & ((np.abs(data['pos2'] - data['pos1']) >= 2500) | (np.abs(data['pos2'] - data['pos1']) == 0))]
 	
 	pos1 = np.array(data['pos1'])
 	pos2 = np.array(data['pos2'])
@@ -126,14 +121,6 @@ def data2mtx(config, file, chrom_start_end, verbose, cell_id):
 	
 	chrom1, chrom2 = np.array(data['chrom1'].values), np.array(data['chrom2'].values)
 	count = np.array(data['count'].values)
-	
-	if downsample < 1:
-		# print ("downsample at", downsample)
-		index = np.random.permutation(len(data))[:int(downsample * len(data))]
-		count = count[index]
-		chrom1 = chrom1[index]
-		bin1 = bin1[index]
-		bin2 = bin2[index]
 	
 	del data
 	
@@ -163,13 +150,109 @@ def extract_table(config):
 	if 'input_format' in config:
 		input_format = config['input_format']
 	else:
-		input_format = 'higashi_v2'
+		input_format = 'higashi_v1'
 	
 	chrom_start_end = np.load(os.path.join(temp_dir, "chrom_start_end.npy"))
+	import multiprocessing
+	cpu_num = multiprocessing.cpu_count()
 	if input_format == 'higashi_v1':
-		print("Sorry no higashi_v1")
-		raise EOFError
-	
+		print("extracting from data.txt")
+		if "structured" in config:
+			if config["structured"]:
+				chunksize = int(5e6)
+				cell_tab = []
+
+				p_list = []
+				pool = ProcessPoolExecutor(max_workers=cpu_num)
+				print("First calculating how many lines are there")
+				line_count = sum(1 for i in open(os.path.join(data_dir, "data.txt"), 'rb'))
+				print("There are %d lines" % line_count)
+				bar = trange(line_count, desc=' - Processing ', leave=False, )
+				cell_num = 0
+				with open(os.path.join(data_dir, "data.txt"), 'r') as csv_file:
+					chunk_count = 0
+					reader = pd.read_csv(csv_file, chunksize=chunksize, sep="\t")
+					for chunk in reader:
+						if len(chunk['cell_id'].unique()) == 1:
+							# Only one cell, keep appending
+							cell_tab.append(chunk)
+						else:
+							# More than one cell, append all but the last part
+							last_cell = np.array(chunk.tail(1)['cell_id'])[0]
+							tails = chunk.iloc[np.array(chunk['cell_id']) != last_cell, :]
+							head = chunk.iloc[np.array(chunk['cell_id']) == last_cell, :]
+							cell_tab.append(tails)
+							cell_tab = pd.concat(cell_tab, axis=0).reset_index()
+							for cell_id in np.unique(cell_tab['cell_id']):
+								p_list.append(
+									pool.submit(data2mtx, config, cell_tab[cell_tab['cell_id'] == cell_id].reset_index(),
+									            chrom_start_end, False, cell_id))
+								cell_num = max(cell_num, cell_id + 1)
+
+							cell_tab = [head]
+							bar.update(n=chunksize)
+							bar.refresh()
+
+
+				if len(cell_tab) != 0:
+					cell_tab = pd.concat(cell_tab, axis=0).reset_index()
+					for cell_id in np.unique(cell_tab['cell_id']):
+						p_list.append(
+							pool.submit(data2mtx, config, cell_tab[cell_tab['cell_id'] == cell_id].reset_index(),
+							            chrom_start_end, False, cell_id))
+						cell_num = max(cell_num, cell_id + 1)
+				cell_num = int(cell_num)
+				mtx_all_list = [[0] * cell_num for i in range(len(chrom_list))]
+
+
+				for p in as_completed(p_list):
+					mtx_list, cell_id = p.result()
+					for i in range(len(chrom_list)):
+						mtx_all_list[i][cell_id] = mtx_list[i]
+
+			else:
+				data = pd.read_table(os.path.join(data_dir, "data.txt"), sep="\t")
+				# ['cell_name','cell_id', 'chrom1', 'pos1', 'chrom2', 'pos2', 'count']
+				cell_id_all = np.unique(data['cell_id'])
+				cell_num = int(np.max(cell_id_all) + 1)
+				bar = trange(cell_num)
+				mtx_all_list = [[0] * cell_num for i in range(len(chrom_list))]
+				p_list = []
+				pool = ProcessPoolExecutor(max_workers=cpu_num)
+				for cell_id in range(cell_num):
+					p_list.append(pool.submit(data2mtx, config, data[data['cell_id'] == cell_id].reset_index(), chrom_start_end, False, cell_id))
+
+				for p in as_completed(p_list):
+					mtx_list, cell_id = p.result()
+					for i in range(len(chrom_list)):
+						mtx_all_list[i][cell_id] = mtx_list[i]
+					bar.update(1)
+				bar.close()
+				pool.shutdown(wait=True)
+
+		else:
+			data = pd.read_table(os.path.join(data_dir, "data.txt"), sep="\t")
+			cell_id_all = np.unique(data['cell_id'])
+			cell_num = int(np.max(cell_id_all) + 1)
+			bar = trange(cell_num)
+			mtx_all_list = [[0] * cell_num for i in range(len(chrom_list))]
+			p_list = []
+			pool = ProcessPoolExecutor(max_workers=cpu_num)
+			for cell_id in range(cell_num):
+				p_list.append(
+					pool.submit(data2mtx, config, data[data['cell_id'] == cell_id].reset_index(), chrom_start_end,
+					            False, cell_id))
+			
+			for p in as_completed(p_list):
+				mtx_list, cell_id = p.result()
+				for i in range(len(chrom_list)):
+					mtx_all_list[i][cell_id] = mtx_list[i]
+				bar.update(1)
+			bar.close()
+			pool.shutdown(wait=True)
+		for i in range(len(chrom_list)):
+			np.save(os.path.join(temp_dir, "raw", "%s_sparse_adj.npy" % chrom_list[i]), mtx_all_list[i],
+			        allow_pickle=True)
 	elif input_format == 'higashi_v2':
 		print("extracting from filelist.txt")
 		with open(os.path.join(data_dir, "filelist.txt"), "r") as f:
@@ -189,14 +272,15 @@ def extract_table(config):
 			bar.update(1)
 		bar.close()
 		pool.shutdown(wait=True)
+		
 		for i in range(len(chrom_list)):
 			np.save(os.path.join(temp_dir, "raw", "%s_sparse_adj.npy" % chrom_list[i]), mtx_all_list[i],
 			        allow_pickle=True)
-	
 	else:
 		print("invalid input format")
 		raise EOFError
-
+	
+	
 
 if __name__ == '__main__':
 	args = parse_args()

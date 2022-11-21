@@ -41,6 +41,7 @@ def parse_args():
 	parser.add_argument('--cache_extra', type=str, default="")
 	parser.add_argument('--filter', action='store_true', default=False)
 	parser.add_argument('--batch_norm', action='store_true', default=False)
+	parser.add_argument('--tol', type=float, default=2e-5)
 
 	return parser.parse_args()
 
@@ -83,7 +84,8 @@ def get_memory_free(gpu_index):
 		print (mem_info)
 		return mem_info.free
 	except:
-		print ("cpu device?")
+		print ("Are you running on CPU devices? If not, check if you have py3nvml installed")
+		print ("Otherwise Fast-Higashi would have an incorrect estimation of the gpu memory")
 		import psutil
 		return psutil.virtual_memory().available
 
@@ -136,7 +138,7 @@ class FastHigashi():
 		self.temp_dir = self.config['temp_dir']
 		self.data_dir = self.config['data_dir']
 		self.fh_resolutions = self.config['resolution_fh']
-		
+		self.embedding_storage = None
 		
 		if path2input_cache is None:
 			path2input_cache = self.temp_dir
@@ -155,37 +157,19 @@ class FastHigashi():
 		_, self.gpu_id = get_free_gpu()
 		if torch.cuda.is_available():
 			self.device = 'cuda'
-			# torch.set_num_threads(4)
+			torch.set_num_threads(4)
 		else:
 			self.device = 'cpu'
-	
-	def eval_batch_mix(self, embed):
-		from pynndescent import PyNNDescentTransformer
-		import warnings
-		from sklearn.decomposition import TruncatedSVD
-		with warnings.catch_warnings():
-			warnings.simplefilter("ignore")
-			if "batch_id" in self.config:
-				batch_id = self.batch_id
-				knn_graph = PyNNDescentTransformer(n_neighbors=50).fit_transform(embed)
-				# print ("first knn")
-				knn_graph.data = np.ones_like(knn_graph.data)
-				knn_graph2nd = knn_graph @ knn_graph.T
-				# print ("sparse dot")
-				knn_graph2nd_embed = TruncatedSVD(n_components=embed.shape[-1]).fit_transform(knn_graph2nd)
-				# print ("svd")
-				knn_graph2nd = PyNNDescentTransformer(n_neighbors=10).fit_transform(knn_graph2nd_embed)
-				# print ("second knn")
-				knn_graph = PyNNDescentTransformer(n_neighbors=10).fit_transform(embed)
-				# print ("third knn")
-				knn_graph = knn_graph.tocoo()
-				knn_graph2nd = knn_graph2nd.tocoo()
-				mix_score = (np.sum(batch_id[knn_graph.row] == batch_id[knn_graph.col]) - len(embed)) / (
-							len(knn_graph.row) - len(embed))
-				mix_score2 = (np.sum(batch_id[knn_graph2nd.row] == batch_id[knn_graph2nd.col]) - len(embed)) / (
-							len(knn_graph2nd.row) - len(embed))
-			
-			return np.array([mix_score, mix_score2])
+	def fast_process_data(self):
+		try:
+			from .Fast_process import create_dir, generate_chrom_start_end, extract_table
+		except:
+			from Fast_process import create_dir, generate_chrom_start_end, extract_table
+		
+		create_dir(self.config)
+		generate_chrom_start_end(self.config)
+		extract_table(self.config)
+		print ("fast process finishes")
 	
 	def preprocess_meta(self):
 		if os.path.isfile(os.path.join(self.path2input_cache, "qc.npy")):
@@ -217,7 +201,15 @@ class FastHigashi():
 			self.batch_id = np.asarray(label_info[self.config['batch_id']])
 		
 		return label_info, reorder, sig_list, readcount, qc
-	
+
+	def sum_sparse_by_batch_id(self, m_list):
+		batch = self.batch_id
+		avail_batch = np.unique(batch)
+		return_dict = {b: np.zeros(m_list[0].shape) for b in avail_batch}
+		for a, b in zip(m_list, batch):
+			return_dict[b][a.row, a.col] += a.data
+		return return_dict
+
 	def pack_training_data_one_process(self,
 			raw_dir, chrom, reorder,
 			off_diag=None,
@@ -230,12 +222,11 @@ class FastHigashi():
 		
 		filename = filename_pattern % chrom
 		a = np.load(os.path.join(raw_dir, filename), allow_pickle=True)[reorder]
-		
 		# For data with blacklist, block those regions
 		try:
 			blacklist = np.load(os.path.join(self.temp_dir, "raw", "blacklist.npy"), allow_pickle=True).item()
 		except:
-			print("no black list")
+			# print("no black list")
 			blacklist = None
 		
 		if blacklist is not None:
@@ -257,28 +248,39 @@ class FastHigashi():
 			for m in matrix_list:
 				m.col //= merge_fac_col
 				m.row //= merge_fac_row
+				
 				m.sum_duplicates()
 				m.resize(list(np.ceil(np.array(m.shape) / np.array([merge_fac_col, merge_fac_row])).astype('int')))
-		
-		bulk = calc_bulk(matrix_list)
-		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk,
+		for m in matrix_list:
+			mask = np.abs(m.col - m.row) <= off_diag
+			m.row = m.row[mask]
+			m.col = m.col[mask]
+			m.data = m.data[mask]
+
+		if "batch_id" in self.config:
+			batch_bulk = self.sum_sparse_by_batch_id(matrix_list)
+			bulk = 0
+			for b in batch_bulk: bulk += batch_bulk[b]
+		else:
+			bulk = self.sum_sparse(matrix_list)
+		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk / len(matrix_list),
 		                                                                                              is_sym=is_sym)
-		
 		if "batch_id" in self.config:
 			if batch_norm:
-				print ("per batch norm")
 				matrix_list = normalize_per_batch(
+					bulk=bulk,
+					batch_bulk=batch_bulk,
 					matrix_list=matrix_list,
-					batch_id=self.batch_id
+					batch_id=self.batch_id,
+					off_diag=off_diag+1
 				)
-			
+
 		matrix_list = normalize_per_cell(
 			matrix_list, matrix_list_intra=matrix_list, bulk=None,
 			per_cell_normalize_func=[
 				normalize_by_coverage,
 			],
 		)
-		
 		assert not any(np.isnan(m.data).any() for m in matrix_list)
 		
 		nnz = sum(m.nnz for m in matrix_list)
@@ -295,7 +297,7 @@ class FastHigashi():
 			if m.nnz == 0: continue
 			row, col, data = bin_id_mapping_row[m.row], bin_id_mapping_col[m.col], m.data
 			col_new = col - row
-			idx = (row != -1) & (col != -1) & (col_new >= -off_diag) & (col_new <= off_diag)
+			idx = (row != -1) & (col != -1) #& (col_new >= -off_diag) & (col_new <= off_diag)
 			# assert idx.sum() > 0
 			row, col, data = row[idx], col_new[idx], data[idx]
 			if isinstance(fac_size, int) and fac_size == 1:
@@ -356,15 +358,19 @@ class FastHigashi():
 		
 		chrom_list = config['chrom_list']
 		
+		if "batch_id" in self.config:
+			if batch_norm:
+				print ("will do per batch normalization")
+				
 		all_matrix = [self.pack_training_data_one_process(
 			raw_dir=Path(config['temp_dir']) / 'raw', chrom=chrom, reorder=reorder,
 			batch_norm=batch_norm,
 			**kwargs,
-		) for chrom in chrom_list]
+		) for chrom in tqdm(chrom_list, desc='packing sparse mtx into sparse tensors')]
 		
-		all_matrix = [Sparse(indices, values, shape, copy=False) for indices, values, shape in tqdm(all_matrix)]
+		all_matrix = [Sparse(indices, values, shape, copy=False) for indices, values, shape in all_matrix]
 		size_list = []
-		for obj in tqdm(all_matrix):
+		for obj in tqdm(all_matrix, desc='Sorting indices in sparse tensors'):
 			obj.sort_indices()
 			size_list.append(obj.shape[0])
 		
@@ -379,7 +385,7 @@ class FastHigashi():
 	@staticmethod
 	def sum_sparse(m):
 		x = np.zeros(m[0].shape)
-		for a in tqdm(m):
+		for a in m:
 			ri = np.repeat(np.arange(a.shape[0]), np.diff(a.indptr))
 			x[ri, a.indices] += a.data
 		return x
@@ -395,22 +401,28 @@ class FastHigashi():
 			read_count = []
 			a = np.load(os.path.join(raw_dir, "%s_sparse_adj.npy" % chrom), allow_pickle=True)
 			bulk = self.sum_sparse(a)
-			cov = np.sum(bulk, axis=-1)
+			cov = np.sum(bulk > 0, axis=-1)
 			n_bin = np.sum(cov > 0.1 * cov.shape[0] * scale)
 			
 			mask_chrom = []
-			for m in tqdm(a):
-				off_diag = (np.sum(m > 0) + np.sum(m.diagonal() > 0)) / 2
-				mask_chrom.append(off_diag)
+			for m in a:
+				# off_diag = (np.sum(m > 0) ) / 2
+				# read_count = len(m.data)
+				mask_chrom.append((len(m.data) +  np.sum(m.diagonal() > 0)) / 2)
 				read_count.append(np.sum(m))
 			# print(n_bin, m.shape[0])
 			read_count = np.asarray(read_count)
 			mask_chrom = np.array(mask_chrom).astype('float')
-			mask.append(mask_chrom > n_bin)
+			# mask_chrom = mask_chrom > n_bin
+			if np.sum(mask_chrom > n_bin) > 0.5 * len(mask_chrom):
+				mask_chrom = mask_chrom > (n_bin)
+			else:
+				mask_chrom = mask_chrom > np.quantile(mask_chrom, 0.5)
+			mask.append(mask_chrom)
 			read_count_all += np.asarray(read_count)
 			# print("pass", np.sum(mask[-1]))
 		kept = (np.sum(np.array(mask).astype('float'), axis=0) >= (len(chrom_list))).astype('float32')
-		print("total number of cells that pass qc check", np.sum(kept))
+		
 		read_count_all = np.log1p(read_count_all)
 		np.save(os.path.join(self.path2input_cache, "qc.npy"), kept)
 		np.save(os.path.join(self.path2input_cache, "read_count_all.npy"), read_count_all)
@@ -422,13 +434,19 @@ class FastHigashi():
 		if meta_only:
 			return
 		good_qc_num = np.sum(qc > 0)
+		print("total number of cells that pass qc check", good_qc_num, "bad", len(qc) - good_qc_num, "total:", len(qc))
 		# print("good", good_qc_num, "bad", len(qc) - good_qc_num)
 		tensor_list = [None] * len(self.fh_resolutions) * len(self.chrom_list)
 		recommend_bs_cell = []
 		ct = 0
 		for res in self.fh_resolutions:
 			all_matrix = []
-			path2input_cache_intra = os.path.join(self.path2input_cache, 'cache_intra_%d%s.pkl' % (res, args.cache_extra))
+			try:
+				cache_extra = args.cache_extra
+			except:
+				cache_extra = ""
+			path2input_cache_intra = os.path.join(self.path2input_cache, 'cache_intra_%d_offdiag_%d_%s.pkl' % (
+				res, self.off_diag, cache_extra))
 			# print("merge_fac_row", int(res / self.config['resolution']))
 			all_matrix += self.preprocess_contact_map(
 				self.config, reorder=reorder, path2input_cache=path2input_cache_intra,
@@ -449,7 +467,6 @@ class FastHigashi():
 			max_tensor_size = avail_mem / (4 * 12)
 			recommend_bs_bin = min(max(int(15000000 / res), 128), 256)
 			total_cell_num = all_matrix[-1].shape[-1]
-			print(total_cell_num)
 			
 			total_reads, total_possible = 0, 0
 			
@@ -462,9 +479,9 @@ class FastHigashi():
 					bs_bin_local = math.ceil(size / n_batch)
 					bs_cell = int(max_tensor_size / (bs_bin_local * (bs_bin_local + 2 * self.off_diag)))
 					# print ("bs_cell", bs_cell)
-					n_batch = int(math.ceil(num_cell / bs_cell))
-					bs_cell = int(math.ceil(num_cell / n_batch))
-					bs_cell = min(bs_cell, num_cell)
+					n_batch = int(math.ceil((good_qc_num if self.filter else num_cell) / bs_cell))
+					bs_cell = int(math.ceil((good_qc_num if self.filter  else num_cell) / n_batch))
+					bs_cell = min(bs_cell, good_qc_num if self.filter  else num_cell)
 				# print ("bs_bin_local", bs_bin_local, size)
 				recommend_bs_cell.append(bs_cell)
 				try:
@@ -509,8 +526,8 @@ class FastHigashi():
 			all_matrix[i].pin_memory()
 		
 		shape_list = np.stack([mtx.shape[:-1] for mtx in all_matrix])
-		print(shape_list, np.sum(shape_list[:, 0]))
-		
+		# print(shape_list, np.sum(shape_list[:, 0]))
+		self.good_qc_num = good_qc_num
 		self.all_matrix = all_matrix
 	
 	def only_partial_rwr(self):
@@ -604,22 +621,27 @@ class FastHigashi():
 	def run_model(self, dim1=.6,
 				  rank=256,
 				  n_iter_parafac=1,
+	              n_iter_max=None,
+	              tol=2e-5,
 				  extra=""):
 		self.rank = rank
 		save_str = "dim1_%.1f_rank_%d_niterp_%d_%s" % (dim1, rank, n_iter_parafac, extra)
 		self.save_str = save_str
 		print(save_str)
 		start = time.time()
-		model = Fast_Higashi_core(rank=rank, off_diag=self.off_diag).to(self.device)
+		model = Fast_Higashi_core(rank=rank, off_diag=self.off_diag, res_list=self.fh_resolutions).to(self.device)
+		if n_iter_max is None:
+			n_iter_max = int(self.good_qc_num / 15)
+			
 		result = model.fit_transform(
 			self.all_matrix,
 			size_ratio=dim1,
-			n_iter_max=100,
-			n_iter_parafac=1,
+			n_iter_max=n_iter_max,
+			n_iter_parafac=n_iter_parafac,
 			do_conv=self.do_conv,
 			do_rwr=self.do_rwr,
 			do_col=self.final_do_col,
-			tol=3.0e-4,
+			tol=tol,
 			gpu_id=self.gpu_id
 		)
 		print("takes: %.2f s" % (time.time() - start))
@@ -647,37 +669,140 @@ class FastHigashi():
 		save_str = "dim1_%.1f_rank_%d_niterp_%d_%s" % (dim1, rank, n_iter_parafac, extra)
 		data = pickle.load(open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "rb"))
 		self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list = data
-		
 	
-	def fetch_cell_embedding(self, final_dim=None, auto_correct=True, restore_order=False):
-		embed = parse_embedding(self.D_list, self.meta_embedding, dim=final_dim if final_dim is not None else self.rank)
-		if restore_order:
-			reorder_embed = np.zeros_like(embed)
-			reorder_embed[self.reorder] = embed
-			embed = reorder_embed
-			
-		embed_l2 = normalize(embed, axis=1)
-		embed_prefer = embed_l2
-		if auto_correct:
+	def check_same_score(self, knn_graph, batch_id):
+		gather = np.zeros(len(batch_id))
+		same = (batch_id[knn_graph.row] == batch_id[knn_graph.col]).astype('float')
+		uniq_dis, uniq_dis_index = np.unique(knn_graph.row, return_index=True)
+		# skip first because it's always nothing
+		v = np.split(same, uniq_dis_index)[1:]
+		for i in range(len(v)):
+			gather[uniq_dis[i]] = v[i].mean()
+		return gather
+	
+	def eval_batch_mix(self, embed):
+		from pynndescent import PyNNDescentTransformer
+		import warnings
+		from sklearn.decomposition import TruncatedSVD
+		with warnings.catch_warnings():
+			warnings.simplefilter("ignore")
 			if "batch_id" in self.config:
-				score_ori = self.eval_batch_mix(embed_l2)
-				embed_correct = self.correct_batch_linear(embed, self.coverage_feats)
-				embed_correct_l2 = normalize(embed_correct)
-				score_correct = self.eval_batch_mix(embed_correct_l2)
-				if np.max(score_ori - score_correct) > 0.01:
-					print ("linear regression of coverage seems to improve the batch mixing")
-					embed_prefer = embed_correct_l2
-					
+				batch_id = self.batch_id
+				knn_graph = PyNNDescentTransformer(n_neighbors=50).fit_transform(embed)
+				knn_graph.data = np.ones_like(knn_graph.data)
+				# The number of
+				knn_graph2nd = knn_graph @ knn_graph.T
+				knn_graph2nd_embed = TruncatedSVD(n_components=embed.shape[-1]).fit_transform(knn_graph2nd)
+				knn_graph2nd = PyNNDescentTransformer(n_neighbors=25).fit_transform(knn_graph2nd_embed)
+				knn_graph = PyNNDescentTransformer(n_neighbors=25).fit_transform(embed)
+				knn_graph = knn_graph.tocoo()
+				knn_graph2nd = knn_graph2nd.tocoo()
+				mix_score = self.check_same_score(knn_graph, batch_id)
+				mix_score2 = self.check_same_score(knn_graph2nd, batch_id)
+			
+			return np.array([mix_score, mix_score2])
+	
+	def restore_order_fun(self, x):
+		new_x = np.zeros_like(x)
+		new_x[self.reorder] = x
+		return new_x
+	
+	def fetch_cell_embedding(self, final_dim=None, restore_order=False):
 		
-		return {'prefer': embed_prefer, 'raw':embed, 'l2_norm_raw': embed_l2}
+		
+		final_dim = self.rank if final_dim is None else final_dim
+		embedding_list = []
+		for p in self.D_list:
+			if type(p).__name__ == 'Tensor': p = p.detach().cpu().numpy()
+			p = p / np.linalg.norm(p, axis=0, keepdims=True)
+			embed = self.meta_embedding @ p
+			embedding_list.append(embed)
+		
+		embedding = np.concatenate(embedding_list, axis=1)
+		from sklearn.preprocessing import quantile_transform
+		c_v = quantile_transform(self.coverage_feats, n_quantiles=100)
+		self.label_info['coverage_fh'] = c_v
+		
+		from sklearn.decomposition import TruncatedSVD
+		model = TruncatedSVD(n_components=final_dim)
+		embed = model.fit_transform(embedding)
+		
+		
+		if restore_order:
+			embedding = self.restore_order_fun(embedding)
+			embed = self.restore_order_fun(embed)
+			
 			
 		
-	def correct_batch_linear(self, embedding, var_to_regress):
+		embed_l2 = normalize(embed)
+		
+		
+		# embed_l2 = normalize(embed, axis=1)
+		# embed_correct_l2 = normalize(embed_correct)
+		# embed_correct2_l2 = normalize(embed_correct2)
+		store = {'embed_all': embedding, 'embed_raw': embed, 'embed_l2_norm': embed_l2, 'restore_order':restore_order}
+		self.embedding_storage = store
+		self.correct_batch_linear('coverage_fh', False)
+		# self.correct_batch_linear('coverage2', add_intercept_back=True)
+		
+		
+		return store
+	
+	def calc_modularity(self, A, label, resolution=1, normalize=True):
+		num_nodes = A.shape[0]
+		import itertools
+		label_a2i = dict(zip(set(label), itertools.count()))
+		num_labels = len(label_a2i)
+		if num_labels == 1: return 0.
+		label = np.fromiter(map(label_a2i.get, label), dtype=int)
+		A = A.tocoo()
+		assert (A.col != A.row).all() # Multiplying diagonal values by 2 might works
+		Asum = A.data.sum()
+		assert Asum > 0
+		score = A.data[label[A.row] == label[A.col]].sum() / Asum
+	
+		k = np.bincount(label[A.row], weights=A.data, minlength=num_labels) / Asum
+		score -= k @ k * resolution
+	
+		if normalize:
+			max_score = k @ (1 - k*resolution)
+			score /= max_score
+	
+		return score
+		
+		
+		
+	def correct_batch_linear(self, var_to_regress_name, add_intercept_back=False):
+		if self.embedding_storage is None:
+			print ("Run fetch_cell_embedding() first!")
+			return None
+		if type(var_to_regress_name) is str:
+			try:
+				var_to_regress = np.array(self.label_info[var_to_regress_name])
+				if self.embedding_storage['restore_order']:
+					var_to_regress = self.restore_order_fun(var_to_regress)
+			except:
+				print ("var_to_regress not in label_info.pickle!")
+				return None
+		else:
+			print("var_to_regress not in label_info.pickle!")
+			return None
+		
 		if len(var_to_regress.shape) == 1:
 			var_to_regress = var_to_regress.reshape((-1, 1))
 		from sklearn.linear_model import LinearRegression
-		embedding = embedding - LinearRegression().fit(var_to_regress, embedding).predict(var_to_regress)
-		return embedding
+		model = LinearRegression()
+		embedding = self.embedding_storage['embed_all']
+		embedding = embedding - model.fit(var_to_regress, embedding).predict(var_to_regress)
+		if add_intercept_back:
+			embedding = embedding + model.intercept_[None]
+		from sklearn.decomposition import TruncatedSVD
+		model = TruncatedSVD(n_components=self.embedding_storage['embed_raw'].shape[-1])
+		reduce = model.fit_transform(embedding)
+		reduce_l2 = normalize(reduce)
+		self.embedding_storage['embed_correct_%s' % var_to_regress_name] = reduce
+		self.embedding_storage['embed_l2_norm_correct_%s' % var_to_regress_name] = reduce_l2
+		return self.embedding_storage
 	
 if __name__ == '__main__':
 	print(time.ctime())
@@ -694,30 +819,45 @@ if __name__ == '__main__':
 				 do_rwr=args.do_rwr,
 				 do_col=args.do_col,
 				 no_col=args.no_col)
-	
+	if not os.path.exists(os.path.join(wrapper.temp_dir, "raw")):
+		wrapper.fast_process_data()
 	# packing data from sparse matrices to
 	wrapper.prep_dataset(batch_norm=args.batch_norm)
-	wrapper.run_model(extra=args.extra, rank=args.rank)
-	
+	# wrapper.run_model(extra=args.extra,
+	#                   rank=args.rank,
+	#                   n_iter_parafac=1,
+	#                   tol=args.tol)
 	
 	# loading existing trained models
-	# wrapper.load_model(extra=args.extra, rank=args.rank)
+	wrapper.load_model(extra=args.extra,
+	                   rank=args.rank,
+	                   n_iter_parafac=1
+	                   )
 	
 	# only do partial_rwr for analysis purpose
 	# wrapper.only_partial_rwr()
 	
 	# getting embedding
 	embed = wrapper.fetch_cell_embedding(final_dim=args.rank,
-	                                     auto_correct=True,
 	                                     restore_order=False)
 	# prefer stands for the embeddings that the algorithm think might perform the best
-	embed = embed['prefer']
+	print (embed.keys())
 	
 	
-	# internal uses... code not uploaded
-	try:
-		from .evaluation import evaluate_combine
-	except:
-		from evaluation import evaluate_combine
-	evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed, project=None, extra=args.cache_extra+"_"+args.extra+"", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
-	                 coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	#
+	# # internal uses... code not uploaded
+	# try:
+	# 	from .evaluation import evaluate_combine
+	# except:
+	# 	from evaluation import evaluate_combine
+	# # evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed['prefer'], project=None, extra=args.cache_extra+"_"+args.extra+"prefer", save_dir=wrapper.path2result_dir, with_CCA=False, label_info=wrapper.label_info,
+	# #                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed['embed_l2_norm'], project=None,
+	#                  extra=args.cache_extra + "_" + args.extra + "l2_norm_raw", save_dir=wrapper.path2result_dir,
+	#                  with_CCA=False, label_info=wrapper.label_info,
+	#                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed['embed_l2_norm_correct_coverage_fh'], project=None,
+	#                  extra=args.cache_extra + "_" + args.extra + "l2_norm_linear", save_dir=wrapper.path2result_dir,
+	#                  with_CCA=False, label_info=wrapper.label_info,
+	#                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	#
