@@ -832,10 +832,10 @@ if __name__ == '__main__':
 		wrapper.fast_process_data()
 	# packing data from sparse matrices to
 	wrapper.prep_dataset(batch_norm=args.batch_norm)
-	# wrapper.run_model(extra=args.extra,
-	#                   rank=args.rank,
-	#                   n_iter_parafac=1,
-	#                   tol=args.tol)
+	wrapper.run_model(extra=args.extra,
+	                  rank=args.rank,
+	                  n_iter_parafac=1,
+	                  tol=args.tol)
 	
 	# loading existing trained models
 	wrapper.load_model(extra=args.extra,
