@@ -1,3 +1,4 @@
+import scipy.sparse._coo
 import torch
 import argparse, os, gc, pickle, sys
 from pathlib import Path
@@ -187,6 +188,7 @@ class FastHigashi():
 		data_dir = self.config['data_dir']
 		with open(os.path.join(data_dir, "label_info.pickle"), "rb") as f:
 			label_info = pd.DataFrame(pickle.load(f))
+			print (label_info)
 		try:
 			plot_label = self.config['plot_label']
 		except:
@@ -262,7 +264,7 @@ class FastHigashi():
 			bulk = 0
 			for b in batch_bulk: bulk += batch_bulk[b]
 		else:
-			bulk = self.sum_sparse(matrix_list)
+			bulk = self.sum_sparse_coo(matrix_list)
 		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk / len(matrix_list),
 		                                                                                              is_sym=is_sym)
 		if "batch_id" in self.config:
@@ -381,13 +383,20 @@ class FastHigashi():
 		
 		sys.stdout.flush()
 		return all_matrix
-	
+
 	@staticmethod
 	def sum_sparse(m):
 		x = np.zeros(m[0].shape)
 		for a in m:
 			ri = np.repeat(np.arange(a.shape[0]), np.diff(a.indptr))
 			x[ri, a.indices] += a.data
+		return x
+
+	@staticmethod
+	def sum_sparse_coo(m):
+		x = np.zeros(m[0].shape)
+		for a in m:
+			x[a.row, a.col] += a.data
 		return x
 	
 	def get_qc(self):
