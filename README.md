@@ -1,5 +1,5 @@
 # Fast-Higashi: Ultrafast and interpretable single-cell 3D genome analysis
-[https://www.biorxiv.org/content/10.1101/2022.04.18.488683v1](https://www.cell.com/cell-systems/pdf/S2405-4712(22)00395-7.pdf)
+[https://www.cell.com/cell-systems/fulltext/S2405-4712(22)00395-7](https://www.cell.com/cell-systems/fulltext/S2405-4712(22)00395-7)
 
 Fast-Higashi is an interpretable model that takes single-cell Hi-C (scHi-C) contact maps as input and jointly infers cell embeddings as well as meta-interactions.
 ![figs/fig1.png](https://github.com/ma-compbio/Fast-Higashi/blob/main/figs/fig1.png)
