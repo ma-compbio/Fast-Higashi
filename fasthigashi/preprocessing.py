@@ -194,7 +194,7 @@ def normalize_per_cell(
 
 def norm2(mtx_list, info, info2, bk_cov):
 	mtx_list, batch = mtx_list
-	for i, m in enumerate(tqdm(mtx_list)):
+	for i, m in enumerate(mtx_list):
 		row, col, data = m.row, m.col, m.data
 		distance = np.abs(row - col).astype('int')
 		# if multihic:

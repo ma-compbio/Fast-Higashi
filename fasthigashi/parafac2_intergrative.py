@@ -16,7 +16,8 @@ except:
 	from util import *
 
 import torch.nn.functional as F
-
+import multiprocessing as mpl
+cpu_count = mpl.cpu_count()
 ## factors are named as : U (dim1, dim2, r), A(dim1, r), B(r, r), D(R, r), meta_embedding(dim3, R)
 ## matmul(meta_embedding, D) are also referred to as C
 ## size_list: list of r
@@ -247,8 +248,12 @@ class Fast_Higashi_core():
 					
 			# feats_for_SVD[chrom_data.chrom] = np.concatenate(feats_for_SVD[chrom_data.chrom], axis=1)
 			size = self.chrom2size[chrom_data.chrom]
+			if self.device != 'cpu':
+				torch.set_num_threads(max(cpu_count - 2, 1))
 			svd = TruncatedSVD(n_components=size, n_iter=2)
 			temp = svd.fit_transform(feats[:, :feats_start])
+			if self.device != 'cpu':
+				torch.set_num_threads(4)
 			# del feats
 			C[:, C_start:C_start+temp.shape[-1]] = temp
 			C_start += temp.shape[-1]
@@ -313,8 +318,8 @@ class Fast_Higashi_core():
 		partial_rwr_time = 0
 		svd_time = 0
 		contract_time = 0
-		
-						
+
+
 		for chrom_index, (chrom_data, A, projection, bin_cov) in enumerate(zip(
 				progressbar(schic), A_list, projection_list,
 				bin_cov_list
@@ -322,17 +327,17 @@ class Fast_Higashi_core():
 			B = B_dict[chrom_data.chrom]
 			D = D_dict[chrom_data.chrom]
 			size = self.chrom2size[chrom_data.chrom]
-			
+
 			# chromosome specific embedding
 			C = torch.matmul(meta_embedding, D)
-			
+
 			for bin_batch_id in range(0, chrom_data.num_bin_batch):
 				slice_ = chrom_data.bin_slice_list[bin_batch_id]
 				slice_local = chrom_data.local_bin_slice_list[bin_batch_id]
 				slice_col = chrom_data.col_bin_slice_list[bin_batch_id]
 				# Fetch and densify the X
 				temp = None
-				
+
 				for cell_batch_id in range(0, chrom_data.num_cell_batch):
 					slice_cell = slice(cell_batch_id * chrom_data.bs_cell,
 					                   min((cell_batch_id + 1) * chrom_data.bs_cell, chrom_data.num_cell))
@@ -354,11 +359,11 @@ class Fast_Higashi_core():
 						                                     bin_cov=bin_cov[slice_cell, slice_col],
 						                                     bin_cov_row=bin_cov[slice_cell, slice_],
 						                                     force_rwr_epochs=self.n_i[chrom_index])
-					
-						
+
+
 					if first_iter:
 						rec_error_tensor_norm[chrom_index] += torch.linalg.norm(chrom_batch_cell_batch).square_().item()
-					
+
 					partial_rwr_time += time.perf_counter() - _t
 					_t = time.perf_counter()
 					# lhs: bs_bin, cell, size
@@ -367,34 +372,35 @@ class Fast_Higashi_core():
 					_t = time.perf_counter()
 					# rhs: bs_bin, # bin2, cell
 					rhs = chrom_batch_cell_batch.to(device)
-					
+
 					if temp is None:
 						temp = torch.bmm(rhs, lhs)
 					else:
 						temp.baddbmm_(rhs, lhs)
 					if cell_batch_id != chrom_data.num_cell_batch-1:
 						del chrom_batch_cell_batch
-					
-				
+
+
 				_t = time.perf_counter()
 				# For smaller batch size or small matrix dimension, cpu is much faster
 				# GPU has advantages when dealing with large batch size or super large matrix
 				# Here, temp is shape of (bs_bin, total_bin, r)
 				# bs_bin < 200, r ~ 100, total_bin can goes up to 2280, so...
-				svd_device = 'cpu' if temp.shape[1] <= 700 else device
-				try:
-					U, S = project2orthogonal(temp.to(svd_device), temp.shape[-1], compute_device=device)
-				except:
-					U, S = project2orthogonal_ill(temp.to(svd_device), temp.shape[-1], compute_device=device)
-					
+				# svd_device = 'cpu' if temp.shape[1] <= 700 else device
+				svd_device = device
+				# try:
+				U, S = project2orthogonal(temp.to(svd_device), temp.shape[-1], compute_device=device)
+				# except:
+				# 	U, S = project2orthogonal_ill(temp.to(svd_device), temp.shape[-1], compute_device=device)
+
 				svd_time += time.perf_counter() - _t
 				_t = time.perf_counter()
-			
+
 				# store projections
 				projection[bin_batch_id] = U.to(projection[bin_batch_id].device)
 				U = U.to(device)
-				
-				
+
+
 				# calc error
 				if S is None:
 					rec_error_x_U[chrom_index] += temp.view(-1).inner(U.view(-1)).item()
@@ -405,14 +411,14 @@ class Fast_Higashi_core():
 					# 	(S.sum().item() - temp.view(-1).inner(U.view(-1)).item()) / S.sum().item()
 					# )
 					rec_error_x_U[chrom_index] += S.sum().item()
-				
-				
-				
+
+
+
 				# lhs: rank, # bin1, size
 				lhs = contract('ir,jr,kr->kij', A[slice_].to(device), B, D)
 				lhs = lhs.reshape(lhs.shape[0], -1)
 				_t = time.perf_counter()
-				
+
 				# First use the last densified one
 				# bin1, size, bin2 * bin1, bin2, bs_cell -> bin1, size, bs_cell
 				_t = time.perf_counter()
@@ -420,12 +426,12 @@ class Fast_Higashi_core():
 				SVD_term[:, slice_cell] += torch.matmul(lhs, projected.reshape(-1, projected.shape[-1]))
 				contract_time += time.perf_counter() - _t
 				_t = time.perf_counter()
-				
+
 				# All but the last one (which has been reused )
 				for cell_batch_id in range(0, chrom_data.num_cell_batch - 1):
 					slice_cell = slice(cell_batch_id * chrom_data.bs_cell,
 					                   min((cell_batch_id + 1) * chrom_data.bs_cell, chrom_data.num_cell))
-					
+
 					if chrom_data.bs_cell < chrom_data.num_cell:
 						_t = time.perf_counter()
 						# torch.cuda.synchronize()
@@ -450,11 +456,11 @@ class Fast_Higashi_core():
 							                                         )
 						else:
 							t1 = 0
-						
+
 						partial_rwr_time += t1
 						partial_rwr_time += time.perf_counter() - _t
 						_t = time.perf_counter()
-						
+
 					# bin1, size, bin2 * bin1, bin2, bs_cell -> bin1, size, bs_cell
 					_t = time.perf_counter()
 					projected = torch.bmm(U.transpose(-1, -2), chrom_batch_cell_batch)
@@ -466,7 +472,7 @@ class Fast_Higashi_core():
 					contract_time += time.perf_counter() - _t
 					del chrom_batch_cell_batch
 					_t = time.perf_counter()
-			
+
 			del C
 		# SVD_term: dim3 * R
 		_t = time.perf_counter()
@@ -474,10 +480,10 @@ class Fast_Higashi_core():
 		svd_time += time.perf_counter() - _t
 		_t = time.perf_counter()
 		rec_error_x_V += meta_embedding.mul(SVD_term.T).sum().item()
-		
+
 		for chrom_index, (chrom_data, projection, bin_cov) in enumerate(
 				zip(progressbar(schic), projection_list, bin_cov_list)):
-			
+
 			for bin_batch_id in range(0, chrom_data.num_bin_batch):
 				gather_project = 0
 				slice_ = chrom_data.bin_slice_list[bin_batch_id]
@@ -505,10 +511,10 @@ class Fast_Higashi_core():
 						                                      bin_cov_row=bin_cov[slice_cell, slice_],
 						                                      force_rwr_epochs=self.n_i[chrom_index])
 						partial_rwr_time += t1
-					
-					
+
+
 					_t = time.perf_counter()
-					
+
 					projected = contract(
 						"ijk,km, ijl -> ilm", chrom_batch_cell_batch, meta_embedding[slice_cell],
 						projection[bin_batch_id].to(meta_embedding.device))
@@ -517,9 +523,9 @@ class Fast_Higashi_core():
 					contract_time += time.perf_counter() - _t
 					_t = time.perf_counter()
 				projected_tensor_list[chrom_data.chrom][chrom_data.global_slice_bin][slice_] = gather_project.to(projected_tensor_list[chrom_data.chrom].device)
-				
+
 		self.meta_embedding = meta_embedding.to(self.meta_embedding.device)
-		
+		# print (densify_time, partial_rwr_time, svd_time, contract_time)
 		gc.collect()
 		try:
 			torch.cuda.empty_cache()
@@ -528,22 +534,23 @@ class Fast_Higashi_core():
 		if first_iter:
 			return projection_list, projected_tensor_list, rec_error_x_U, rec_error_x_V, rec_error_tensor_norm
 		return projection_list, projected_tensor_list, rec_error_x_U, rec_error_x_V
-	
-	
-	
+
+
+
 	def fit(self, schic, size_ratio=0.3,
 	                  n_iter_max=2000, n_iter_parafac=5,
 	                  do_conv=True, do_rwr=False, do_col=False, tol=1e-8,
 	                  size_list = None, gpu_id=None,
-	                  verbose=True):
-		
+	                  verbose=True,
+					  run_init=True):
+
 		self.gpu_id = gpu_id
 		self.all_in_gpu = False
 		self.benchmark_speed = False
 		rank = self.rank
 		device = self.device
 		# Calculating sizes, the size would be forced to be the same for matrix from the same chromosomes
-		
+
 		if size_list is None:
 			size_list = [min(int(chrom_data.shape[0] * size_ratio * chrom_data.resolution / 1000000), rank)
 			             for chrom_data in schic]
@@ -564,7 +571,7 @@ class Fast_Higashi_core():
 						raise EOFError
 				else:
 					chrom2size[chrom] = size
-		
+
 		self.chrom2size = chrom2size
 		self.chrom2num_bin = {}
 		self.chrom2id = {chrom:[] for chrom in self.chrom2size}
@@ -577,15 +584,15 @@ class Fast_Higashi_core():
 				chrom_data.global_slice_bin = slice(self.chrom2num_bin[chrom_data.chrom],
 				                                    self.chrom2num_bin[chrom_data.chrom]+chrom_data.num_bin)
 				self.chrom2num_bin[chrom_data.chrom] += chrom_data.num_bin
-				
-		
+
+
 		del size_list
-		
-		self.init_params(schic, do_conv, do_rwr, do_col)
+		if run_init:
+			self.init_params(schic, do_conv, do_rwr, do_col)
 		rec_errors = []
 		rec_errors_total = []
-		
-		
+
+
 		# create_projection_list:
 		projection_list = []
 		for chrom_data in schic:
@@ -608,7 +615,7 @@ class Fast_Higashi_core():
 		if gpu_flag:
 			for a in projected_tensor_list: projected_tensor_list[a] = projected_tensor_list[a].pin_memory()
 		rec_error_core_norm = np.zeros([len(schic), 1])
-		
+
 		for chrom_index, (chrom_data, A, re_c, bin_cov) in enumerate(zip(
 				progressbar(schic), self.A_list, rec_error_core_norm, self.bin_cov_list)):
 			B = self.B_dict[chrom_data.chrom]
@@ -616,13 +623,13 @@ class Fast_Higashi_core():
 			for i in range(0, chrom_data.num_bin, chrom_data.bs_bin):
 				slice_ = slice(i, i + chrom_data.bs_bin)
 				c = contract('ir,jr,kr->kij', A[slice_].to(device), B, D)
-				
+
 				re_c[:] += torch.linalg.norm(c).square_().item()
 				del c
-		
+
 		rec_error_tensor_norm = None
 		for iteration in range(n_iter_max):
-			if (iteration % 10) == 0 and iteration > 0 and n_iter_parafac < 5:
+			if (iteration % 10) == 0 and iteration > 0 and n_iter_parafac < 10:
 				n_iter_parafac += 1
 				# print ("n_iter_para", n_iter_parafac)
 			print("Starting iteration", iteration)
@@ -729,10 +736,10 @@ class Fast_Higashi_core():
 		return self
 		
 	def transform(self, schic, do_conv, do_rwr, do_col):
-		if self.device == 'cpu':
-			do_conv = False
-			do_rwr = False
-			do_col = False
+		# if self.device == 'cpu':
+		# 	do_conv = False
+		# 	do_rwr = False
+		# 	do_col = False
 		# final update of meta-embeddings:
 		device = self.device
 		projection_list = self.projection_list
@@ -826,13 +833,13 @@ class Fast_Higashi_core():
 	                  n_iter_max=2000, n_iter_parafac=5,
 	                  do_conv=True, do_rwr=False, do_col=False, tol=1e-8,
 	                  size_list = None, gpu_id=None,
-	                  verbose=True):
+	                  verbose=True, run_init=True):
 		print ("n_iter_parafac", n_iter_parafac)
 		self.fit(schic, size_ratio,
 	                  n_iter_max, n_iter_parafac,
 	                  do_conv, do_rwr, do_col, tol,
 	                  size_list, gpu_id,
-	                  verbose)
+	                  verbose, run_init)
 			
 			
 		

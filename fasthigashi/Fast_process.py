@@ -91,7 +91,7 @@ def generate_chrom_start_end(config):
 	np.save(os.path.join(temp_dir, "chrom_start_end.npy"), chrom_start_end)
 
 
-def data2mtx(config, file, chrom_start_end, verbose, cell_id):
+def data2mtx(config, file, chrom_start_end, verbose, cell_id, blacklist=""):
 	if type(file) is str:
 		if "header_included" in config:
 			if config['header_included']:
@@ -113,7 +113,10 @@ def data2mtx(config, file, chrom_start_end, verbose, cell_id):
 	chrom_list = config['chrom_list']
 	
 	data = data[(data['chrom1'] == data['chrom2']) & ((np.abs(data['pos2'] - data['pos1']) >= 2500) | (np.abs(data['pos2'] - data['pos1']) == 0))]
-	
+
+	if blacklist != "":
+		data = remove_blacklist(blacklist, data)
+
 	pos1 = np.array(data['pos1'])
 	pos2 = np.array(data['pos2'])
 	bin1 = np.floor(pos1 / res).astype('int')
@@ -147,6 +150,10 @@ def extract_table(config):
 	data_dir = config['data_dir']
 	temp_dir = config['temp_dir']
 	chrom_list = config['chrom_list']
+	if "blacklist" in config:
+		blacklist = config["blacklist"]
+	else:
+		blacklist = ""
 	if 'input_format' in config:
 		input_format = config['input_format']
 	else:
@@ -186,7 +193,7 @@ def extract_table(config):
 							for cell_id in np.unique(cell_tab['cell_id']):
 								p_list.append(
 									pool.submit(data2mtx, config, cell_tab[cell_tab['cell_id'] == cell_id].reset_index(),
-									            chrom_start_end, False, cell_id))
+									            chrom_start_end, False, cell_id, blacklist))
 								cell_num = max(cell_num, cell_id + 1)
 
 							cell_tab = [head]
@@ -199,7 +206,7 @@ def extract_table(config):
 					for cell_id in np.unique(cell_tab['cell_id']):
 						p_list.append(
 							pool.submit(data2mtx, config, cell_tab[cell_tab['cell_id'] == cell_id].reset_index(),
-							            chrom_start_end, False, cell_id))
+							            chrom_start_end, False, cell_id, blacklist))
 						cell_num = max(cell_num, cell_id + 1)
 				cell_num = int(cell_num)
 				mtx_all_list = [[0] * cell_num for i in range(len(chrom_list))]
@@ -220,7 +227,8 @@ def extract_table(config):
 				p_list = []
 				pool = ProcessPoolExecutor(max_workers=cpu_num)
 				for cell_id in range(cell_num):
-					p_list.append(pool.submit(data2mtx, config, data[data['cell_id'] == cell_id].reset_index(), chrom_start_end, False, cell_id))
+					p_list.append(pool.submit(data2mtx, config, data[data['cell_id'] == cell_id].reset_index(),
+											  chrom_start_end, False, cell_id, blacklist))
 
 				for p in as_completed(p_list):
 					mtx_list, cell_id = p.result()
@@ -241,7 +249,7 @@ def extract_table(config):
 			for cell_id in range(cell_num):
 				p_list.append(
 					pool.submit(data2mtx, config, data[data['cell_id'] == cell_id].reset_index(), chrom_start_end,
-					            False, cell_id))
+					            False, cell_id, blacklist))
 			
 			for p in as_completed(p_list):
 				mtx_list, cell_id = p.result()
@@ -263,7 +271,7 @@ def extract_table(config):
 		p_list = []
 		pool = ProcessPoolExecutor(max_workers=cpu_num)
 		for cell_id, file in enumerate(filelist):
-			p_list.append(pool.submit(data2mtx, config, file, chrom_start_end, False, cell_id))
+			p_list.append(pool.submit(data2mtx, config, file, chrom_start_end, False, cell_id, blacklist))
 		
 		for p in as_completed(p_list):
 			mtx_list, cell_id = p.result()
@@ -281,6 +289,37 @@ def extract_table(config):
 		raise EOFError
 	
 	
+def remove_blacklist(blacklistbed, chromdf):
+	import pybedtools
+	blacklist = pybedtools.BedTool(blacklistbed)
+	left = chromdf[['chrom1', 'pos1', 'pos1']].copy()
+	left.loc[:, 'temp_indexname'] = np.arange(len(left))
+
+	right = chromdf[['chrom2', 'pos2', 'pos2']].copy()
+	right.loc[:, 'temp_indexname'] = np.arange(len(right))
+
+	import tempfile
+	f1 = tempfile.NamedTemporaryFile()
+	left.to_csv(f1, sep="\t", header=False, index=False)
+	bed_anchor = pybedtools.BedTool(f1.name)
+	good_anchor = bed_anchor.subtract(blacklist)
+	good_anchor_left = good_anchor.to_dataframe()
+
+	f2 = tempfile.NamedTemporaryFile()
+	right.to_csv(f2, sep="\t", header=False, index=False)
+	bed_anchor = pybedtools.BedTool(f2.name)
+	good_anchor = bed_anchor.subtract(blacklist)
+	good_anchor_right = good_anchor.to_dataframe()
+
+	good_index = np.intersect1d(good_anchor_left['name'], good_anchor_right['name'])
+	ori_len = len(chromdf)
+	# str1 = "length from %d " % len(chromdf)
+	chromdf =  chromdf.iloc[good_index, :]
+	# str1 += "to %d" % (len(chromdf))
+	# if len(chromdf) < ori_len:
+	# 	print (str1)
+	return chromdf
+
 
 if __name__ == '__main__':
 	args = parse_args()
