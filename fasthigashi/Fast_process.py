@@ -318,6 +318,7 @@ def remove_blacklist(blacklistbed, chromdf):
 	# str1 += "to %d" % (len(chromdf))
 	# if len(chromdf) < ori_len:
 	# 	print (str1)
+	pybedtools.helpers.cleanup()
 	return chromdf
 
 
