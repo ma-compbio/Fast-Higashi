@@ -64,33 +64,31 @@ def get_free_gpu(num=1):
 	if len(memory_available) > 0:
 		max_mem = np.max(memory_available)
 		ids = np.where(memory_available >= max_mem-1000)[0]
-		if num == 1:
-			chosen_id = int(np.random.choice(ids, 1)[0])
-			print("setting to gpu:%d" % chosen_id)
-			sys.stdout.flush()
-			torch.cuda.set_device(chosen_id)
-			return torch.device("cuda:%d" % chosen_id), chosen_id
-		else:
-			return None, np.random.choice(ids, num, replace=False)
+		chosen_id = int(np.random.choice(ids, 1)[0])
+		print("setting to gpu:%d" % chosen_id, "available memory =", max_mem, "MB")
+		sys.stdout.flush()
+		torch.cuda.set_device(chosen_id)
+		return torch.device("cuda:%d" % chosen_id), chosen_id, max_mem * 1000000
 	else:
-		return None, None
-
-
-def get_memory_free(gpu_index):
-	try:
-		from py3nvml import py3nvml
-		print ("gpu mem")
-		py3nvml.nvmlInit()
-		handle = py3nvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
-		mem_info = py3nvml.nvmlDeviceGetMemoryInfo(handle)
-		print (mem_info)
-		return mem_info.free
-	except:
-		print ("Are you running on CPU devices? If not, check if you have py3nvml installed")
-		print ("Otherwise Fast-Higashi would have an incorrect estimation of the gpu memory")
+		print("running on cpu device then")
 		import psutil
-		return psutil.virtual_memory().available
+		mem = psutil.virtual_memory().available
+		return None, None, mem
 
+# def get_memory_free(gpu_index):
+# 	try:
+# 		from py3nvml import py3nvml
+# 		print ("gpu mem")
+# 		py3nvml.nvmlInit()
+# 		handle = py3nvml.nvmlDeviceGetHandleByIndex(int(gpu_index))
+# 		mem_info = py3nvml.nvmlDeviceGetMemoryInfo(handle)
+# 		print (mem_info)
+# 		return mem_info.free
+# 	except:
+# 		print ("Are you running on CPU devices? If not, check if you have py3nvml installed")
+# 		print ("Otherwise Fast-Higashi would have an incorrect estimation of the gpu memory")
+# 		import psutil
+# 		return psutil.virtual_memory().available
 
 def parse_embedding(project_list, fac, dim=None):
 	if dim is None:
@@ -157,7 +155,7 @@ class FastHigashi():
 		if not os.path.exists(path2result_dir):
 			os.mkdir(path2result_dir)
 
-		_, self.gpu_id = get_free_gpu()
+		_, self.gpu_id, self.avail_mem = get_free_gpu()
 		if torch.cuda.is_available():
 			self.device = 'cuda'
 			torch.set_num_threads(CPU_per_GPU)
@@ -497,7 +495,7 @@ class FastHigashi():
 
 			size_list = [m.shape[0] for m in all_matrix]
 			num_cell = all_matrix[-1].shape[-1]
-			avail_mem = get_memory_free(self.gpu_id)
+			avail_mem = self.avail_mem
 			# 4 because of float32 -> bytes,
 			# 10 because of overhead & cache
 			max_tensor_size = avail_mem / (4 * 12)

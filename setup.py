@@ -19,7 +19,10 @@ setup(
         'h5py',
         'seaborn>=0.11.2',
         'umap-learn>=0.5',
-        'opt_einsum'
+        'opt_einsum',
+        'pybedtools',
+        'pytorch',
+        'psutil'
     ],
     extras_require={},
     author='Ruochi Zhang',
