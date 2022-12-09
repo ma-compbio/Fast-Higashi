@@ -2,7 +2,7 @@ import scipy.sparse._coo
 import torch
 import argparse, os, gc, pickle, sys
 from pathlib import Path
-from tqdm.auto import tqdm
+from tqdm.auto import tqdm, trange
 import math, time, h5py
 import numpy as np
 import pandas as pd
@@ -229,7 +229,8 @@ class FastHigashi():
 			is_sym=True,
 			filename_pattern='%s_sparse_adj.npy',
 			force_shift=None,
-	        batch_norm=True):
+	        batch_norm=True,
+			bar=None):
 
 		filename = filename_pattern % chrom
 		a = np.load(os.path.join(raw_dir, filename), allow_pickle=True)[reorder]
@@ -262,18 +263,23 @@ class FastHigashi():
 
 				m.sum_duplicates()
 				m.resize(list(np.ceil(np.array(m.shape) / np.array([merge_fac_col, merge_fac_row])).astype('int')))
+		if bar is not None:
+			bar.set_description("sparse mtx into tensors %s - filter off-diag" % chrom, refresh=True)
 		for m in matrix_list:
 			mask = np.abs(m.col - m.row) <= off_diag
 			m.row = m.row[mask]
 			m.col = m.col[mask]
 			m.data = m.data[mask]
 
+		if bar is not None:
+			bar.set_description("sparse mtx into tensors %s - get bulk"  % chrom, refresh=True)
 		if "batch_id" in self.config:
 			batch_bulk = self.sum_sparse_by_batch_id(matrix_list)
 			bulk = 0
 			for b in batch_bulk: bulk += batch_bulk[b]
 		else:
 			bulk = self.sum_sparse_coo(matrix_list)
+
 		bin_id_mapping_row, num_bins_row, bin_id_mapping_col, num_bins_col, v_row, v_col = filter_bin(bulk=bulk / len(matrix_list),
 		                                                                                              is_sym=is_sym)
 		if "batch_id" in self.config:
@@ -285,7 +291,8 @@ class FastHigashi():
 					batch_id=self.batch_id,
 					off_diag=off_diag+1
 				)
-
+		if bar is not None:
+			bar.set_description("sparse mtx into tensors %s - read count normalize"  % chrom, refresh=True)
 		matrix_list = normalize_per_cell(
 			matrix_list, matrix_list_intra=matrix_list, bulk=None,
 			per_cell_normalize_func=[
@@ -302,7 +309,8 @@ class FastHigashi():
 		shape = (num_bins_row, num_bins_col)
 		col_offset = None
 		do_shift = False
-
+		if bar is not None:
+			bar.set_description("sparse mtx into tensors %s - mtx indices 2 tensor indices"  % chrom, refresh=True)
 		idx_nnz = 0
 		for i, m in enumerate(matrix_list):
 			if m.nnz == 0: continue
@@ -348,7 +356,8 @@ class FastHigashi():
 		assert indices.min() >= 0
 		assert (indices.max(1) < shape).all()
 		gc.collect()
-
+		if bar is not None:
+			bar.set_description("sparse mtx into tensors %s - final touches"  % chrom, refresh=True)
 		values = np.log1p(values)
 		if is_sym:
 			s = 15
@@ -356,6 +365,7 @@ class FastHigashi():
 			s = 15
 		mean_, std_ = np.mean(values), np.std(values)
 		values = np.clip(values, a_min=None, a_max=mean_ + s * std_)
+
 		return indices, values, shape
 
 	def preprocess_contact_map(self, config, reorder, path2input_cache, batch_norm, key_fn=lambda c: c, **kwargs):
@@ -364,7 +374,11 @@ class FastHigashi():
 
 		if do_cache and os.path.exists(path2input_cache):
 			print(f'loading cached input from {path2input_cache}')
-			with open(path2input_cache, 'rb') as f: all_matrix = pickle.load(f)
+			all_matrix = []
+			with open(path2input_cache, 'rb') as f:
+				for chrom in self.chrom_list:
+					all_matrix.append(pickle.load(f))
+			sys.stdout.flush()
 			return all_matrix
 
 		chrom_list = config['chrom_list']
@@ -372,23 +386,30 @@ class FastHigashi():
 		if "batch_id" in self.config:
 			if batch_norm:
 				print ("will do per batch normalization")
-
-		all_matrix = [self.pack_training_data_one_process(
-			raw_dir=Path(config['temp_dir']) / 'raw', chrom=chrom, reorder=reorder,
-			batch_norm=batch_norm,
-			**kwargs,
-		) for chrom in tqdm(chrom_list, desc='packing sparse mtx into sparse tensors')]
-
-		all_matrix = [Sparse(indices, values, shape, copy=False) for indices, values, shape in all_matrix]
 		size_list = []
-		for obj in tqdm(all_matrix, desc='Sorting indices in sparse tensors'):
-			obj.sort_indices()
-			size_list.append(obj.shape[0])
+		print(f'saving cached input to {path2input_cache}')
+		bar = trange(len(chrom_list), desc='sparse mtx into tensors')
+		with open(path2input_cache, 'wb') as f:
+			for chrom in chrom_list:
+				indices, values, shape = self.pack_training_data_one_process(
+					raw_dir=Path(config['temp_dir']) / 'raw', chrom=chrom, reorder=reorder,
+					batch_norm=batch_norm, bar=bar,
+					**kwargs,)
+				bar.set_description("sparse mtx into tensors %s - construct sparse" % chrom, refresh=True)
+				obj = Sparse(indices, values, shape, copy=False)
+				bar.set_description("sparse mtx into tensors %s - sort sparse indices" % chrom, refresh=True)
+				obj.sort_indices()
 
-		if do_cache:
-			print(f'saving cached input to {path2input_cache}')
-			sys.stdout.flush()
-			with open(path2input_cache, 'wb') as f: pickle.dump(all_matrix, f, protocol=4)
+				bar.update(1)
+				bar.refresh()
+				size_list.append(obj.shape[0])
+				# all_matrix.append(obj)
+				pickle.dump(obj, f, protocol=4)
+				sys.stdout.flush()
+		all_matrix = []
+		with open(path2input_cache, 'rb') as f:
+			for i in range(len(size_list)):
+				all_matrix.append(pickle.load(f))
 		sys.stdout.flush()
 		return all_matrix
 
@@ -445,6 +466,7 @@ class FastHigashi():
 
 		self.label_info, reorder, self.sig_list, readcount, qc = self.preprocess_meta()
 		self.reorder = reorder
+		self.coverage_feats = readcount[reorder].reshape((-1, 1))
 		if meta_only:
 			return
 		good_qc_num = np.sum(qc > 0)
@@ -452,6 +474,8 @@ class FastHigashi():
 		tensor_list = [None] * len(self.fh_resolutions) * len(self.chrom_list)
 		recommend_bs_cell = []
 		ct = 0
+
+
 		for res in self.fh_resolutions:
 			all_matrix = []
 			try:
@@ -481,7 +505,7 @@ class FastHigashi():
 			total_cell_num = all_matrix[-1].shape[-1]
 
 			total_reads, total_possible = 0, 0
-
+			bar = trange(len(self.chrom_list), desc='breaking into batches')
 			for i, size in enumerate(size_list):
 				n_batch = max(math.ceil(size / recommend_bs_bin), 1)
 				if self.device == 'cpu':
@@ -513,13 +537,14 @@ class FastHigashi():
 					chrom=self.chrom_list[i],
 					resolution=res)
 				ct += 1
+				bar.update(1)
 
-
+			bar.close()
 			sparsity = total_reads / total_possible
 			print("sparsity", sparsity)
 			del all_matrix
 			gc.collect()
-
+			bar.close()
 			if sparsity * (500000 / res) ** 2 <= 0.03:
 				print("sparsity below threshold, automatically col_normalize")
 			do_col = sparsity * (500000 / res) ** 2 <= 0.03 or self.do_col
@@ -531,12 +556,12 @@ class FastHigashi():
 				print("choose one between do col or no col!")
 				raise EOFError
 
-		self.coverage_feats = readcount[reorder].reshape((-1, 1))
+
 		print("recommend_bs_cell", recommend_bs_cell, "pinning memory")
 		all_matrix = tensor_list
 		for i in range(len(all_matrix)):
 			all_matrix[i].pin_memory()
-
+		gc.collect()
 		shape_list = np.stack([mtx.shape[:-1] for mtx in all_matrix])
 		# print(shape_list, np.sum(shape_list[:, 0]))
 		self.good_qc_num = good_qc_num
@@ -685,6 +710,7 @@ class FastHigashi():
 				  extra=""):
 		save_str = "dim1_%.1f_rank_%d_niterp_%d_%s" % (dim1, rank, n_iter_parafac, extra)
 		data = pickle.load(open(os.path.join(self.path2result_dir, "results_all%s.pkl" % save_str), "rb"))
+		print ("model loaded")
 		self.A_list, self.B_list, self.D_list, self.meta_embedding, self.p_list = data
 
 	def check_same_score(self, knn_graph, batch_id):
@@ -725,7 +751,7 @@ class FastHigashi():
 		return new_x
 
 	def fetch_cell_embedding(self, final_dim=None, restore_order=False):
-
+		print ("fetching embedding")
 
 		final_dim = self.rank if final_dim is None else final_dim
 		embedding_list = []
@@ -798,15 +824,48 @@ class FastHigashi():
 				var_to_regress = np.array(self.label_info[var_to_regress_name])
 				if self.embedding_storage['restore_order']:
 					var_to_regress = self.restore_order_fun(var_to_regress)
+				# print (var_to_regress, var_to_regress.dtype,)
+				if var_to_regress.dtype not in [np.dtype('float32'), np.dtype('float16'), np.dtype('float64')]:
+					print ("not float var, one hot encoding")
+					uniq = np.unique(var_to_regress)
+					var_to_regress_new = np.zeros((len(var_to_regress), len(uniq)))
+					for i, u_ in enumerate(uniq):
+						var_to_regress_new[var_to_regress == u_, i] = 1
+					var_to_regress = var_to_regress_new
+
 			except:
 				print ("var_to_regress not in label_info.pickle!")
 				return None
+		elif type(var_to_regress_name) is list:
+			var_to_regress_all = []
+			for name in var_to_regress_name:
+				try:
+					var_to_regress = np.array(self.label_info[name])
+					if self.embedding_storage['restore_order']:
+						var_to_regress = self.restore_order_fun(var_to_regress)
+					print(var_to_regress, var_to_regress.dtype, )
+					if var_to_regress.dtype not in [np.dtype('float32'), np.dtype('float16'), np.dtype('float64')]:
+						print("not float var, one hot encoding")
+						uniq = np.unique(var_to_regress)
+						var_to_regress_new = np.zeros((len(var_to_regress), len(uniq)))
+						for i, u_ in enumerate(uniq):
+							var_to_regress_new[var_to_regress == u_, i] = 1
+						var_to_regress = var_to_regress_new
+					if len(var_to_regress.shape) == 1:
+						var_to_regress = var_to_regress.reshape((-1, 1))
+					var_to_regress_all.append(var_to_regress)
+				except:
+					print("var_to_regress %s not in label_info.pickle!" % name)
+					return None
+			var_to_regress = np.concatenate(var_to_regress_all, axis=-1)
+			var_to_regress_name = "_".join(var_to_regress_name)
 		else:
-			print("var_to_regress not in label_info.pickle!")
+			print("var_to_regress must be a str or list of strs")
 			return None
 
 		if len(var_to_regress.shape) == 1:
 			var_to_regress = var_to_regress.reshape((-1, 1))
+		# print (var_to_regress.shape)
 		from sklearn.linear_model import LinearRegression
 		model = LinearRegression()
 		embedding = self.embedding_storage['embed_all']
@@ -863,12 +922,18 @@ if __name__ == '__main__':
 	# getting embedding
 	embed = wrapper.fetch_cell_embedding(final_dim=args.rank,
 	                                     restore_order=False)
+
+
+
+
 	# prefer stands for the embeddings that the algorithm think might perform the best
 	print (embed.keys())
 
 
 
-	# internal uses... code not uploaded
+	# ## internal uses... code not uploaded
+	# wrapper.correct_batch_linear("Donor")
+	# wrapper.correct_batch_linear(["Donor", "Region"])
 	# try:
 	# 	from .evaluation import evaluate_combine
 	# except:
@@ -884,3 +949,14 @@ if __name__ == '__main__':
 	#                  with_CCA=False, label_info=wrapper.label_info,
 	#                  coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
 	#
+	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed['embed_l2_norm_correct_Donor'],
+	# 				 project=None,
+	# 				 extra=args.cache_extra + "_" + args.extra + "l2_norm_donor", save_dir=wrapper.path2result_dir,
+	# 				 with_CCA=False, label_info=wrapper.label_info,
+	# 				 coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)
+	#
+	# evaluate_combine(wrapper.config, wrapper.sig_list, [slice(None)], embed['embed_l2_norm_correct_Donor_Region'],
+	# 				 project=None,
+	# 				 extra=args.cache_extra + "_" + args.extra + "l2_norm_donor_region", save_dir=wrapper.path2result_dir,
+	# 				 with_CCA=False, label_info=wrapper.label_info,
+	# 				 coverage_feats=None, log=None, number_only=False, save_fmt='png', linear_corr=False)

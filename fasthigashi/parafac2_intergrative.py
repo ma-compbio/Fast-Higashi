@@ -87,8 +87,8 @@ class Fast_Higashi_core():
 		bad_bin_cov_list = []
 		n_i_all = []
 		feats_for_SVD = {chrom: [] for chrom in self.chrom2size}
-		
-		for chrom_data in tqdm(schic, desc="initializing params"):
+		bar_ = tqdm(schic, desc="initializing params")
+		for chrom_data in bar_:
 			if C is None:
 				C = np.empty((chrom_data.num_cell, cum_size_list[-1]))
 				C_start = 0
@@ -143,16 +143,17 @@ class Fast_Higashi_core():
 						n_i_list.append(n_i)
 						
 						if not do_col:
-						
 							if conv_flag:
-								B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
-								             stride=ll)[:, 0, :, :]
+								B = F.avg_pool2d(chrom_batch_cell_batch[:,None],
+												 ll, ll, padding=0, ceil_mode=False)[:, 0, :, :]
+								# print (B.shape, chrom_batch_cell_batch.shape)
 							else:
 								B = chrom_batch_cell_batch
-							
-							# feat.append(
-							# 	B.cpu().numpy())
 							B = B.cpu().numpy().reshape((len(B), -1))
+
+							# if chrom_data.num_cell > 20000:
+							# 	# large number of cells, sparsify
+							# 	B[B <= 2e-8] = 0.0
 							try:
 								feats[slice_cell, feats_start:feats_start+B.shape[-1]] = B
 							except Exception as e:
@@ -164,7 +165,7 @@ class Fast_Higashi_core():
 					del chrom_batch_cell_batch
 				if not do_col:
 					feats_start += B.shape[-1]
-				gc.collect()
+				# gc.collect()
 				try:
 					torch.cuda.empty_cache()
 				except:
@@ -225,8 +226,8 @@ class Fast_Higashi_core():
 							
 							
 							if conv_flag:
-								B = F.conv2d(chrom_batch_cell_batch[:, None, :, :], conv_filter,
-								             stride=ll)[:, 0, :, :]
+								B = F.avg_pool2d(chrom_batch_cell_batch[:,None],
+												 ll, ll, padding=0, ceil_mode=False)[:, 0, :, :]
 							else:
 								B = chrom_batch_cell_batch
 							
@@ -250,6 +251,9 @@ class Fast_Higashi_core():
 			size = self.chrom2size[chrom_data.chrom]
 			if self.device != 'cpu':
 				torch.set_num_threads(max(cpu_count - 2, 1))
+			# print ("turning into sparse")
+			# feats = csr_matrix(feats)
+			bar_.set_description("initializing params - SVD ing %s: " %str(feats[:,:feats_start].shape), refresh=True)
 			svd = TruncatedSVD(n_components=size, n_iter=2)
 			temp = svd.fit_transform(feats[:, :feats_start])
 			if self.device != 'cpu':
@@ -257,7 +261,7 @@ class Fast_Higashi_core():
 			# del feats
 			C[:, C_start:C_start+temp.shape[-1]] = temp
 			C_start += temp.shape[-1]
-			
+			bar_.set_description("initializing params - finished SVD ", refresh=True)
 			n_i_all.append(np.max(n_i_list) if len(n_i_list) > 0 else 0)
 			if type(bin_cov) is not float:
 				bin_cov[bin_cov <= 1e-4] = float('inf')
@@ -585,7 +589,7 @@ class Fast_Higashi_core():
 				                                    self.chrom2num_bin[chrom_data.chrom]+chrom_data.num_bin)
 				self.chrom2num_bin[chrom_data.chrom] += chrom_data.num_bin
 
-
+		print ("empty params initialized")
 		del size_list
 		if run_init:
 			self.init_params(schic, do_conv, do_rwr, do_col)

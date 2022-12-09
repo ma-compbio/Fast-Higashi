@@ -98,7 +98,7 @@ def data2mtx(config, file, chrom_start_end, verbose, cell_id, blacklist=""):
 				tab = pd.read_table(file, sep="\t")
 			else:
 				tab = pd.read_table(file, sep="\t", header=None)
-				tab.columns = config['contact_header']
+				tab.columns = config['contact_header'][:len(tab.columns)]
 		else:
 			tab = pd.read_table(file, sep="\t", header=None)
 			tab.columns = config['contact_header']
