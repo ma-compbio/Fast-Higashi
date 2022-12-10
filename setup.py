@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 print (find_packages())
 setup(
     name='fast-higashi',
-    version='0.0.1a0',
+    version='0.1.1a0',
     description='Fast-Higashi: Ultrafast and interpretable single-cell 3D genome analysis',
     url='https://github.com/ma-compbio/Fast-Higashi',
     include_package_data=True,
