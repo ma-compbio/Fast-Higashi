@@ -1,4 +1,3 @@
-import scipy.sparse._coo
 import torch
 import argparse, os, gc, pickle, sys
 from pathlib import Path
