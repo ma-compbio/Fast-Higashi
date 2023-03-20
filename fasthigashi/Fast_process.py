@@ -114,7 +114,7 @@ def data2mtx(config, file, chrom_start_end, verbose, cell_id, blacklist=""):
 	
 	data = data[(data['chrom1'] == data['chrom2']) & ((np.abs(data['pos2'] - data['pos1']) >= 2500) | (np.abs(data['pos2'] - data['pos1']) == 0))]
 
-	if blacklist != "":
+	if blacklist != "" and len(data) > 0:
 		data = remove_blacklist(blacklist, data)
 
 	pos1 = np.array(data['pos1'])
