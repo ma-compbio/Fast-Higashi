@@ -5,9 +5,14 @@ Fast-Higashi is an interpretable model that takes single-cell Hi-C (scHi-C) cont
 ![figs/fig1.png](https://github.com/ma-compbio/Fast-Higashi/blob/main/figs/fig1.png)
 # Installation
 
-We now have Fast-Higashi on conda as well!
+We now have Fast-Higashi on conda!
 
-`conda install -c ruochiz fasthigashi` (only for linux)
+Do 
+`conda install -c ruochiz fasthigashi`
+or
+`mamba install -c ruochiz fasthigashi`
+
+After that install the latest pytorch with corresponding CUDA support. Check https://pytorch.org for details. Note that fasthigashi won't check if you have pytorch installed. So, the user would have to install the correct pytorch version individually.
 
 ```{bash}
 git clone https://github.com/ma-compbio/Fast-Higashi/
