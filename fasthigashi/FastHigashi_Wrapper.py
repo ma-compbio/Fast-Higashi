@@ -1,13 +1,28 @@
-import torch
-import argparse, os, gc, pickle, sys
+import argparse
+import gc
+import itertools
+import json
+import math
+import multiprocessing as mpl
+import os
+import pickle
+import sys
+import time
+import warnings
 from pathlib import Path
-from tqdm.auto import tqdm, trange
-import math, time, h5py
+
+import h5py
 import numpy as np
 import pandas as pd
+import psutil
+import torch
+from pynndescent import PyNNDescentTransformer
 from scipy.sparse import coo_matrix, csr_matrix
+from sklearn.decomposition import TruncatedSVD
+from sklearn.linear_model import LinearRegression
 from sklearn.preprocessing import normalize
-import multiprocessing as mpl
+from sklearn.preprocessing import quantile_transform
+from tqdm.auto import tqdm, trange
 
 try:
 	from .parafac2_intergrative import Fast_Higashi_core
@@ -20,6 +35,14 @@ except:
 		from sparse_for_schic import Sparse, Chrom_Dataset
 	except:
 		raise EOFError
+
+try:
+	from .Fast_process import create_dir, generate_chrom_start_end, extract_table
+	from .partial_rwr import partial_rwr
+except:
+	from Fast_process import create_dir, generate_chrom_start_end, extract_table
+	from partial_rwr import partial_rwr
+
 
 CPU_per_GPU = 4
 def parse_args():
@@ -48,7 +71,6 @@ def parse_args():
 
 
 def get_config(config_path = "./config.jSON"):
-	import json
 	c = open(config_path,"r")
 	return json.load(c)
 
@@ -70,7 +92,6 @@ def get_free_gpu(num=1):
 		return torch.device("cuda:%d" % chosen_id), chosen_id, max_mem * 1000000
 	else:
 		print("running on cpu device then")
-		import psutil
 		mem = psutil.virtual_memory().available
 		return None, None, mem
 
@@ -102,7 +123,6 @@ def parse_embedding(project_list, fac, dim=None):
 		embedding_list.append(embed)
 
 	embedding = np.concatenate(embedding_list, axis=1)
-	from sklearn.decomposition import TruncatedSVD
 	model = TruncatedSVD(n_components=dim)
 	embedding = model.fit_transform(embedding)
 	return embedding
@@ -163,10 +183,7 @@ class FastHigashi():
 			cpu_count = mpl.cpu_count()
 			torch.set_num_threads(max(cpu_count - 2, 1))
 	def fast_process_data(self):
-		try:
-			from .Fast_process import create_dir, generate_chrom_start_end, extract_table
-		except:
-			from Fast_process import create_dir, generate_chrom_start_end, extract_table
+
 
 		create_dir(self.config)
 		generate_chrom_start_end(self.config)
@@ -567,10 +584,7 @@ class FastHigashi():
 			torch.set_num_threads(CPU_per_GPU)
 
 	def only_partial_rwr(self):
-		try:
-			from .partial_rwr import partial_rwr
-		except:
-			from partial_rwr import partial_rwr
+
 		chrom_count = 0
 		impute_result = h5py.File(os.path.join(self.path2result_dir, "impute_prwr.hdf5"), "w")
 		for chrom_data in tqdm(self.all_matrix, desc="imputing"):
@@ -721,9 +735,6 @@ class FastHigashi():
 		return gather
 
 	def eval_batch_mix(self, embed):
-		from pynndescent import PyNNDescentTransformer
-		import warnings
-		from sklearn.decomposition import TruncatedSVD
 		with warnings.catch_warnings():
 			warnings.simplefilter("ignore")
 			if "batch_id" in self.config:
@@ -759,11 +770,9 @@ class FastHigashi():
 			embedding_list.append(embed)
 
 		embedding = np.concatenate(embedding_list, axis=1)
-		from sklearn.preprocessing import quantile_transform
 		c_v = quantile_transform(self.coverage_feats, n_quantiles=100)
 		self.label_info['coverage_fh'] = c_v
 
-		from sklearn.decomposition import TruncatedSVD
 		model = TruncatedSVD(n_components=final_dim)
 		embed = model.fit_transform(embedding)
 
@@ -790,7 +799,6 @@ class FastHigashi():
 
 	def calc_modularity(self, A, label, resolution=1, normalize=True):
 		num_nodes = A.shape[0]
-		import itertools
 		label_a2i = dict(zip(set(label), itertools.count()))
 		num_labels = len(label_a2i)
 		if num_labels == 1: return 0.
@@ -863,13 +871,11 @@ class FastHigashi():
 		if len(var_to_regress.shape) == 1:
 			var_to_regress = var_to_regress.reshape((-1, 1))
 		# print (var_to_regress.shape)
-		from sklearn.linear_model import LinearRegression
 		model = LinearRegression()
 		embedding = self.embedding_storage['embed_all']
 		embedding = embedding - model.fit(var_to_regress, embedding).predict(var_to_regress)
 		if add_intercept_back:
 			embedding = embedding + model.intercept_[None]
-		from sklearn.decomposition import TruncatedSVD
 		model = TruncatedSVD(n_components=self.embedding_storage['embed_raw'].shape[-1])
 		reduce = model.fit_transform(embedding)
 		reduce_l2 = normalize(reduce)

@@ -1,7 +1,5 @@
 import torch
-import torch.jit as jit
-import numpy as np
-from functools import partial
+
 
 def project2orthogonal(matrix: torch.Tensor, rank:int, compute_device:torch.device):
 	dim_1, dim_2 = matrix.shape[-2], matrix.shape[-1]

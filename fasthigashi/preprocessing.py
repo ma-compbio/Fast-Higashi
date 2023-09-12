@@ -1,13 +1,12 @@
-import time, sys, itertools
-from tqdm.auto import tqdm, trange
+import itertools
+import sys
 
-import pandas as pd
 import numpy as np
-from scipy.sparse import coo_matrix
-
+import pandas as pd
 from scipy.ndimage import gaussian_filter
-from scipy.sparse import csr_matrix, save_npz, diags, eye, vstack
-from sklearn.linear_model import LinearRegression
+from scipy.sparse import coo_matrix
+from tqdm.auto import tqdm
+
 
 # Include VC / VC_SQRT norm
 class NormalizerBin:
@@ -188,7 +187,7 @@ def normalize_per_cell(
 		for func in per_cell_normalize_func:
 			m = func(m, mi)
 			matrix_list[i] = m
-			
+
 	return matrix_list
 
 
@@ -202,16 +201,16 @@ def norm2(mtx_list, info, info2, bk_cov):
 		ratio = info[batch[i]]
 		cov = info2[batch[i]]
 		data = data / (np.sqrt(cov[row]) * np.sqrt(cov[col])) * (np.sqrt(bk_cov[row]) * np.sqrt(bk_cov[col]))
-		
+
 		d = distance
 		# divided by batch ratio
 		new_data = data / (ratio[d] + 1e-15)
-		
+
 		m.data = new_data
 		mtx_list[i] = m
-		
-		
-		
+
+
+
 	return mtx_list
 
 
@@ -237,8 +236,7 @@ def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 	bulk /= (np.sqrt(bk_cov[None]) + 1e-15)
 	bulk /= (np.sqrt(bk_cov[:, None]) + 1e-15)
 	bk_sum = bulk.sum()
-	
-	import math
+
 	# max_size = int(math.ceil((math.sqrt(8*(bulk.shape[0]-1) + 1) - 1) / 2)) + 1
 	# if multihic:
 	# 	bulk_ratio = np.zeros((max_size))
@@ -249,7 +247,7 @@ def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 		# id_ = int(math.ceil((math.sqrt(8*k + 1) - 1) / 2)) if multihic else k
 		id_ = k
 		bulk_ratio[id_] += a
-		
+
 	bulk_ratio = np.array(bulk_ratio) / bk_sum
 	for b in batch_bulk.keys():
 		m = batch_bulk[b]
@@ -259,7 +257,7 @@ def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 		m = m / (np.sqrt(m_cov[:, None]) + 1e-15)
 		#
 		m_sum = m.sum()
-		
+
 		# if multihic:
 		# 	ratio = np.zeros((max_size))
 		# else:
@@ -269,15 +267,15 @@ def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 			# id_ = int(math.ceil((math.sqrt(8 * k + 1) - 1) / 2)) if multihic else k
 			id_ = k
 			ratio[id_] += a
-			
+
 		ratio = np.array(ratio) / (m_sum + 1e-15)
-		
+
 		info[b] = ratio / (bulk_ratio + 1e-15)
 		info2[b] = np.array(m_cov)
 
-	from tqdm.contrib.concurrent import process_map
+	# from tqdm.contrib.concurrent import process_map
 	# from functools import partial
-	from multiprocessing import Pool
+	# from multiprocessing import Pool
 
 	# func = partial(norm2, info=info, info2=info2, bk_cov=bk_cov)
 	# batch_num = int(len(matrix_list) / 250)
@@ -288,7 +286,7 @@ def normalize_per_batch(bulk, batch_bulk, matrix_list, batch_id, off_diag):
 	# matrix_list = process_map(func, zip(matrix_list,batch_id), max_workers=batch_num, total=len(matrix_list))
 	# # matrix_list = p.map(func, zip(matrix_list,batch_id))
 	# matrix_list = np.concatenate(matrix_list, axis=0)
-	
+
 	return list(matrix_list)
 
 

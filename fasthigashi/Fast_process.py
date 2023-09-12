@@ -1,15 +1,17 @@
 import argparse
-import shutil
+import json
+import math
+import multiprocessing
 import os
-import numpy as np
-import torch
-import torch.nn.functional as F
-from tqdm.auto import tqdm, trange
-from scipy.sparse import csr_matrix, vstack, SparseEfficiencyWarning, diags, \
-	hstack
+import tempfile
 from concurrent.futures import ProcessPoolExecutor, as_completed
-import h5py, math
+
+import numpy as np
 import pandas as pd
+import pybedtools
+import torch
+from scipy.sparse import csr_matrix
+from tqdm.auto import trange
 
 # try:
 # 	get_ipython()
@@ -24,7 +26,6 @@ device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 device_ids = [0, 1]
 
 def get_config(config_path = "./config.jSON"):
-	import json
 	c = open(config_path,"r")
 	return json.load(c)
 
@@ -160,7 +161,6 @@ def extract_table(config):
 		input_format = 'higashi_v1'
 	
 	chrom_start_end = np.load(os.path.join(temp_dir, "chrom_start_end.npy"))
-	import multiprocessing
 	cpu_num = multiprocessing.cpu_count()
 	if input_format == 'higashi_v1':
 		print("extracting from data.txt")
@@ -290,7 +290,6 @@ def extract_table(config):
 	
 	
 def remove_blacklist(blacklistbed, chromdf):
-	import pybedtools
 	blacklist = pybedtools.BedTool(blacklistbed)
 	left = chromdf[['chrom1', 'pos1', 'pos1']].copy()
 	left.loc[:, 'temp_indexname'] = np.arange(len(left))
@@ -298,7 +297,6 @@ def remove_blacklist(blacklistbed, chromdf):
 	right = chromdf[['chrom2', 'pos2', 'pos2']].copy()
 	right.loc[:, 'temp_indexname'] = np.arange(len(right))
 
-	import tempfile
 	f1 = tempfile.NamedTemporaryFile()
 	left.to_csv(f1, sep="\t", header=False, index=False)
 	bed_anchor = pybedtools.BedTool(f1.name)

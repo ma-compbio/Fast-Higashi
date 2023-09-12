@@ -1,9 +1,10 @@
-import gc
-import time
+import multiprocessing as mpl
+
 import torch.cuda
-import torch.jit as jit
+import torch.nn.functional as F
 from opt_einsum import contract
 from sklearn.decomposition import TruncatedSVD
+
 try:
 	from .parafac_integrative import parafac
 	from .project2orthogonal import *
@@ -15,8 +16,7 @@ except:
 	from partial_rwr import partial_rwr, tilte2rec
 	from util import *
 
-import torch.nn.functional as F
-import multiprocessing as mpl
+
 cpu_count = mpl.cpu_count()
 ## factors are named as : U (dim1, dim2, r), A(dim1, r), B(r, r), D(R, r), meta_embedding(dim3, R)
 ## matmul(meta_embedding, D) are also referred to as C
