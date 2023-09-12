@@ -1,9 +1,8 @@
 import torch
 import torch.nn.functional as F
-import time
-import numpy as np
+
 torch.backends.cudnn.benchmark = True
-import torch.jit as jit
+
 
 def slice_arrange_func(x, slice_,strips=30):
 	num_bin = int(x.shape[1])

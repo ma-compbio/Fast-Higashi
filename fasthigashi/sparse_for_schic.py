@@ -1,12 +1,13 @@
-import copy, time
 import gc
 import math
+import time
+from typing import List
+
 import numpy as np
-from scipy.sparse._sparsetools import coo_tocsr
-from scipy.sparse import coo_matrix, csr_matrix
 import torch
-from typing import Dict, List, Tuple
-from tqdm import tqdm, trange
+from scipy.sparse import coo_matrix, csr_matrix
+from scipy.sparse._sparsetools import coo_tocsr
+
 #TODO: use numpy.unravel_index
 
 gpu_flag = torch.cuda.is_available()
@@ -274,7 +275,7 @@ class Sparse:
 	def numel(self):
 		return int(np.prod(self.shape))
 	
-import torch.jit as jit
+# import torch.jit as jit
 # @jit.script
 def densify_jit(shape:torch.Tensor,
                 indices:List[torch.Tensor],
